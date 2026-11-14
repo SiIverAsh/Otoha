@@ -1,4 +1,4 @@
-# Otoha（音葉）
+# Otoha
 
 面向 DLsite 音声作品的开源自托管流媒体服务器。  
 Open-source, zero-CGO, single-binary self-hosted streaming server for user-owned DLsite voice works.
