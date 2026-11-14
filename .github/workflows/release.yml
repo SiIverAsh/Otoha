@@ -116,7 +116,10 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: build
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    if: >-
+      (github.event_name == 'push' && github.ref_type == 'tag') ||
+      (github.ref == 'refs/heads/main' &&
+       (github.event_name == 'push' || github.event_name == 'workflow_dispatch'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -132,9 +135,39 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
           set -euo pipefail
           (cd dist && sha256sum --check checksums.txt)
+          if [[ "$REF_TYPE" != tag ]]; then
+            RELEASE_TAG=nightly
+            notes="$RUNNER_TEMP/nightly-notes.md"
+            cat > "$notes" <<EOF
+          Automatic development build from main. This pre-release is updated after every successful main build.
+
+          Commit: https://github.com/$GH_REPO/commit/$GITHUB_SHA
+          Build: https://github.com/$GH_REPO/actions/runs/$GITHUB_RUN_ID
+
+          Download the archive for your platform and verify it with checksums.txt.
+          EOF
+            if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+              gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/old-assets.txt"
+              gh release upload "$RELEASE_TAG" dist/* --clobber
+              while IFS= read -r asset; do
+                if [[ ! -f "dist/$asset" ]]; then
+                  gh release delete-asset "$RELEASE_TAG" "$asset" --yes
+                fi
+              done < "$RUNNER_TEMP/old-assets.txt"
+              gh api "repos/$GH_REPO/git/refs/tags/$RELEASE_TAG" --method PATCH \
+                -f sha="$GITHUB_SHA" -F force=true
+              gh release edit "$RELEASE_TAG" --title "Otoha development build" \
+                --notes-file "$notes" --prerelease --latest=false
+            else
+              gh release create "$RELEASE_TAG" dist/* --target "$GITHUB_SHA" \
+                --title "Otoha development build" --notes-file "$notes" --prerelease --latest=false
+            fi
+            exit 0
+          fi
           flags=()
           if [[ "$RELEASE_TAG" == *-* ]]; then flags+=(--prerelease); fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then

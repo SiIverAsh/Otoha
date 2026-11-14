@@ -101,6 +101,10 @@ main 推送或手动运行后，还会生成 Linux、Windows、macOS 各 amd64/a
 可在 Actions 的 `release-assets` artifact 下载（保留 14 天）；Pull Request 只运行检查。
 每个包包含程序、README、LICENSE 和部署示例，另附 SHA-256 校验和。
 
+main 构建成功后会自动创建或更新 [nightly 预发布版](https://github.com/SiIverAsh/Otoha/releases/tag/nightly)，
+可直接在 Releases 页面下载。手动在 main 上运行也会更新该预发布版；旧构建附件会被替换，
+Release 说明与 nightly 标签会指向本次构建的提交，正式版本的附件不受影响。
+
 推送版本标签会在测试及构建成功后自动发布 GitHub Release：
 
 ```sh
