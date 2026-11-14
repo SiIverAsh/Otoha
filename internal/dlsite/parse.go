@@ -20,34 +20,48 @@ const (
 	AgeR18     = 3
 )
 
-// Metadata represents unified work metadata extracted from DLsite (§3.4).
+// Metadata represents unified work metadata extracted from DLsite or asmr.one (§3.4).
 type Metadata struct {
-	Workno             string   `json:"workno"`
-	Title              string   `json:"title"`
-	CircleID           string   `json:"circle_id,omitempty"`
-	CircleName         string   `json:"circle_name,omitempty"`
-	ReleaseDate        string   `json:"release_date,omitempty"`
-	AgeCategory        int      `json:"age_category"`
-	WorkType           string   `json:"work_type,omitempty"`
-	Price              int      `json:"price,omitempty"`
-	Rating             float64  `json:"rating,omitempty"`
-	RateCount          int      `json:"rate_count,omitempty"`
-	ReviewCount        int      `json:"review_count,omitempty"`
-	DLCount            int      `json:"dl_count,omitempty"`
-	FileSize           int64    `json:"file_size,omitempty"`
-	SeriesID           string   `json:"series_id,omitempty"`
-	SeriesName         string   `json:"series_name,omitempty"`
-	CoverURL           string   `json:"cover_url,omitempty"`
-	VAs                []string `json:"vas,omitempty"`
-	Scenarios          []string `json:"scenarios,omitempty"`
-	Illusts            []string `json:"illusts,omitempty"`
-	Musics             []string `json:"musics,omitempty"`
-	Tags               []string `json:"tags,omitempty"`
-	OriginalWorkno     string   `json:"original_workno,omitempty"`
-	Locale             string   `json:"locale,omitempty"`
-	Source             string   `json:"source,omitempty"`
-	NotFound           bool     `json:"not_found,omitempty"`
-	FetchedAt          int64    `json:"fetched_at"`
+	Workno               string   `json:"workno"`
+	AsmrOneID            int      `json:"asmrone_id,omitempty"`
+	Title                string   `json:"title"`
+	CircleID             string   `json:"circle_id,omitempty"`
+	CircleName           string   `json:"circle_name,omitempty"`
+	ReleaseDate          string   `json:"release_date,omitempty"`
+	CreateDate           string   `json:"create_date,omitempty"`
+	AgeCategory          int      `json:"age_category"`
+	WorkType             string   `json:"work_type,omitempty"`
+	Price                int      `json:"price,omitempty"`
+	Rating               float64  `json:"rating,omitempty"`
+	RateCount            int      `json:"rate_count,omitempty"`
+	ReviewCount          int      `json:"review_count,omitempty"`
+	DLCount              int      `json:"dl_count,omitempty"`
+	FileSize             int64    `json:"file_size,omitempty"`
+	Duration             int      `json:"duration,omitempty"`
+	HasSubtitle          bool     `json:"has_subtitle,omitempty"`
+	SeriesID             string   `json:"series_id,omitempty"`
+	SeriesName           string   `json:"series_name,omitempty"`
+	CoverURL             string   `json:"cover_url,omitempty"`
+	SamCoverURL          string   `json:"sam_cover_url,omitempty"`
+	ThumbnailCoverURL    string   `json:"thumbnail_cover_url,omitempty"`
+	SourceType           string   `json:"source_type,omitempty"`
+	SourceURL            string   `json:"source_url,omitempty"`
+	WorkAttributes       string   `json:"work_attributes,omitempty"`
+	LanguageEditionsJSON string   `json:"language_editions_json,omitempty"`
+	OtherEditionsJSON    string   `json:"other_editions_json,omitempty"`
+	TranslationInfoJSON  string   `json:"translation_info_json,omitempty"`
+	RateDetailJSON       string   `json:"rate_detail_json,omitempty"`
+	RankJSON             string   `json:"rank_json,omitempty"`
+	VAs                  []string `json:"vas,omitempty"`
+	Scenarios            []string `json:"scenarios,omitempty"`
+	Illusts              []string `json:"illusts,omitempty"`
+	Musics               []string `json:"musics,omitempty"`
+	Tags                 []string `json:"tags,omitempty"`
+	OriginalWorkno       string   `json:"original_workno,omitempty"`
+	Locale               string   `json:"locale,omitempty"`
+	Source               string   `json:"source,omitempty"`
+	NotFound             bool     `json:"not_found,omitempty"`
+	FetchedAt            int64    `json:"fetched_at"`
 }
 
 // FormatLocaleParam returns the underscore locale required by product.json (?locale=zh_cn).
@@ -336,6 +350,51 @@ func MergeFallbackMetadata(dst, src *Metadata) {
 	}
 	if len(dst.Tags) == 0 {
 		dst.Tags = append([]string(nil), src.Tags...)
+	}
+	if dst.AsmrOneID == 0 {
+		dst.AsmrOneID = src.AsmrOneID
+	}
+	if dst.CreateDate == "" {
+		dst.CreateDate = src.CreateDate
+	}
+	if dst.Duration == 0 {
+		dst.Duration = src.Duration
+	}
+	if !dst.HasSubtitle && src.HasSubtitle {
+		dst.HasSubtitle = true
+	}
+	if dst.SamCoverURL == "" {
+		dst.SamCoverURL = src.SamCoverURL
+	}
+	if dst.ThumbnailCoverURL == "" {
+		dst.ThumbnailCoverURL = src.ThumbnailCoverURL
+	}
+	if dst.SourceType == "" {
+		dst.SourceType = src.SourceType
+	}
+	if dst.SourceURL == "" {
+		dst.SourceURL = src.SourceURL
+	}
+	if dst.WorkAttributes == "" {
+		dst.WorkAttributes = src.WorkAttributes
+	}
+	if dst.LanguageEditionsJSON == "" {
+		dst.LanguageEditionsJSON = src.LanguageEditionsJSON
+	}
+	if dst.OtherEditionsJSON == "" {
+		dst.OtherEditionsJSON = src.OtherEditionsJSON
+	}
+	if dst.TranslationInfoJSON == "" {
+		dst.TranslationInfoJSON = src.TranslationInfoJSON
+	}
+	if dst.RateDetailJSON == "" {
+		dst.RateDetailJSON = src.RateDetailJSON
+	}
+	if dst.RankJSON == "" {
+		dst.RankJSON = src.RankJSON
+	}
+	if dst.OriginalWorkno == "" {
+		dst.OriginalWorkno = src.OriginalWorkno
 	}
 }
 

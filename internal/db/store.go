@@ -28,31 +28,38 @@ var ValidProgress = map[string]bool{
 }
 
 type Work struct {
-	Workno        string   `json:"workno"`
-	Title         string   `json:"title"`
-	CircleID      string   `json:"circle_id"`
-	CircleName    string   `json:"circle_name"`
-	ReleaseDate   string   `json:"release_date"`
-	AgeCategory   int      `json:"age_category"`
-	WorkType      string   `json:"work_type"`
-	SeriesID      string   `json:"series_id"`
-	SeriesName    string   `json:"series_name"`
-	Price         int      `json:"price"`
-	FileSize      int64    `json:"file_size"`
-	Rating        float64  `json:"rating"`
-	RateCount     int      `json:"rate_count"`
-	ReviewCount   int      `json:"review_count"`
-	DLCount       int      `json:"dl_count"`
-	CoverPath     string   `json:"cover_path,omitempty"`
-	CoverURL      string   `json:"cover_url,omitempty"`
-	NeedsRescrape bool     `json:"needs_rescrape"`
-	ScrapedAt     int64    `json:"scraped_at"`
-	CreatedAt     int64    `json:"created_at"`
-	VAs           []string `json:"vas"`
-	Tags          []Tag    `json:"tags"`
-	UserRating    *int     `json:"user_rating,omitempty"`
-	Progress      string   `json:"progress,omitempty"`
-	TrackCount    int      `json:"track_count"`
+	Workno            string   `json:"workno"`
+	AsmrOneID         int      `json:"asmrone_id,omitempty"`
+	Title             string   `json:"title"`
+	CircleID          string   `json:"circle_id"`
+	CircleName        string   `json:"circle_name"`
+	ReleaseDate       string   `json:"release_date"`
+	CreateDate        string   `json:"create_date,omitempty"`
+	AgeCategory       int      `json:"age_category"`
+	WorkType          string   `json:"work_type"`
+	SeriesID          string   `json:"series_id"`
+	SeriesName        string   `json:"series_name"`
+	Price             int      `json:"price"`
+	FileSize          int64    `json:"file_size"`
+	Duration          int      `json:"duration,omitempty"`
+	HasSubtitle       bool     `json:"has_subtitle"`
+	Rating            float64  `json:"rating"`
+	RateCount         int      `json:"rate_count"`
+	ReviewCount       int      `json:"review_count"`
+	DLCount           int      `json:"dl_count"`
+	CoverPath         string   `json:"cover_path,omitempty"`
+	CoverURL          string   `json:"cover_url,omitempty"`
+	SamCoverURL       string   `json:"sam_cover_url,omitempty"`
+	ThumbnailCoverURL string   `json:"thumbnail_cover_url,omitempty"`
+	OriginalWorkno    string   `json:"original_workno,omitempty"`
+	NeedsRescrape     bool     `json:"needs_rescrape"`
+	ScrapedAt         int64    `json:"scraped_at"`
+	CreatedAt         int64    `json:"created_at"`
+	VAs               []string `json:"vas"`
+	Tags              []Tag    `json:"tags"`
+	UserRating        *int     `json:"user_rating,omitempty"`
+	Progress          string   `json:"progress,omitempty"`
+	TrackCount        int      `json:"track_count"`
 }
 
 type Tag struct {
@@ -80,6 +87,12 @@ type Track struct {
 	Ord          int      `json:"ord"`
 	PlayPosition float64  `json:"play_position"`
 	HasSubtitle  bool     `json:"has_subtitle"`
+	StreamURL    string   `json:"stream_url,omitempty"`
+	DownloadURL  string   `json:"download_url,omitempty"`
+	StreamLowURL string   `json:"stream_low_url,omitempty"`
+	SubtitleURL  string   `json:"subtitle_url,omitempty"`
+	RemoteHash   string   `json:"remote_hash,omitempty"`
+	IsRemote     bool     `json:"is_remote,omitempty"`
 }
 
 type TrackTreeNode struct {
@@ -101,13 +114,22 @@ type UserState struct {
 
 type WorkDetail struct {
 	Work
-	Scenarios []string         `json:"scenarios"`
-	Illusts   []string         `json:"illusts"`
-	Musics    []string         `json:"musics"`
-	Paths     []WorkPath       `json:"paths"`
-	Tracks    []Track          `json:"tracks"`
-	Tree      []*TrackTreeNode `json:"tree"`
-	State     *UserState       `json:"state,omitempty"`
+	SourceType           string           `json:"source_type,omitempty"`
+	SourceURL            string           `json:"source_url,omitempty"`
+	WorkAttributes       string           `json:"work_attributes,omitempty"`
+	LanguageEditionsJSON string           `json:"language_editions_json,omitempty"`
+	OtherEditionsJSON    string           `json:"other_editions_json,omitempty"`
+	TranslationInfoJSON  string           `json:"translation_info_json,omitempty"`
+	RateDetailJSON       string           `json:"rate_detail_json,omitempty"`
+	RankJSON             string           `json:"rank_json,omitempty"`
+	RemoteFilesJSON      string           `json:"remote_files_json,omitempty"`
+	Scenarios            []string         `json:"scenarios"`
+	Illusts              []string         `json:"illusts"`
+	Musics               []string         `json:"musics"`
+	Paths                []WorkPath       `json:"paths"`
+	Tracks               []Track          `json:"tracks"`
+	Tree                 []*TrackTreeNode `json:"tree"`
+	State                *UserState       `json:"state,omitempty"`
 }
 
 type Storage struct {
@@ -154,9 +176,10 @@ type ListWorksOptions struct {
 	Circle    string
 	VA        string
 	Tag       string
-	Progress  string
-	StorageID int64
-	Worknos   []string // optional explicit workno set from Bleve search
+	Progress     string
+	StorageID    int64
+	SubtitleOnly bool
+	Worknos      []string // optional explicit workno set from Bleve search
 	QueryLike string   // optional degraded SQL LIKE search
 }
 
@@ -372,29 +395,70 @@ func (s *Store) UpsertScannedWork(ctx context.Context, storageID int64, workno, 
 	return tx.Commit()
 }
 
-// SaveMetadata writes DLsite (or manually edited) metadata into SQLite while preserving
-// user tags (`tag.source = 'user'`) and local cover priority (§4.3: local cover > DLsite cover).
+// SaveMetadata writes DLsite, asmr.one, or manually edited metadata into SQLite while preserving
+// user tags (`tag.source = 'user'`) and local cover priority (§4.3: local cover > remote cover).
 func (s *Store) SaveMetadata(ctx context.Context, meta *dlsite.Metadata, downloadedCoverPath string, preferLocalCover bool) error {
 	if meta == nil {
 		return nil
 	}
-	wno := dlsite.NormalizeWorkno(meta.Workno)
-	if wno == "" {
-		return fmt.Errorf("invalid workno in metadata: %q", meta.Workno)
-	}
-	now := time.Now().Unix()
-	if meta.FetchedAt > 0 {
-		now = meta.FetchedAt
-	}
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if _, err := saveMetadataTx(ctx, tx, meta, downloadedCoverPath, preferLocalCover); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// SaveMetadataBatch commits a batch of metadata items in a single SQLite transaction,
+// returning newly inserted count vs duplicate/existing count (never counting duplicates as failures).
+func (s *Store) SaveMetadataBatch(ctx context.Context, items []*dlsite.Metadata) (inserted int, duplicates int, err error) {
+	if len(items) == 0 {
+		return 0, 0, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, meta := range items {
+		if meta == nil {
+			continue
+		}
+		existed, sErr := saveMetadataTx(ctx, tx, meta, "", true)
+		if sErr != nil {
+			return inserted, duplicates, sErr
+		}
+		if existed {
+			duplicates++
+		} else {
+			inserted++
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return inserted, duplicates, nil
+}
+
+func saveMetadataTx(ctx context.Context, tx *sql.Tx, meta *dlsite.Metadata, downloadedCoverPath string, preferLocalCover bool) (alreadyExisted bool, err error) {
+	wno := dlsite.NormalizeWorkno(meta.Workno)
+	if wno == "" {
+		return false, fmt.Errorf("invalid workno in metadata: %q", meta.Workno)
+	}
+	now := time.Now().Unix()
+	if meta.FetchedAt > 0 {
+		now = meta.FetchedAt
+	}
+
 	var existingCover sql.NullString
-	_ = tx.QueryRowContext(ctx, `SELECT cover_path FROM work WHERE workno = ?`, wno).Scan(&existingCover)
+	rowErr := tx.QueryRowContext(ctx, `SELECT cover_path FROM work WHERE workno = ?`, wno).Scan(&existingCover)
+	alreadyExisted = rowErr == nil
+
 	coverToSet := existingCover.String
 	if downloadedCoverPath != "" {
 		if !preferLocalCover || coverToSet == "" {
@@ -406,47 +470,66 @@ func (s *Store) SaveMetadata(ctx context.Context, meta *dlsite.Metadata, downloa
 	if title == "" {
 		title = wno
 	}
+	hasSubInt := 0
+	if meta.HasSubtitle {
+		hasSubInt = 1
+	}
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO work (
-			workno, title, circle_id, circle_name, release_date, age_category,
-			work_type, series_id, series_name, price, file_size, rating,
-			rate_count, review_count, dl_count, cover_path, cover_url,
-			needs_rescrape, scraped_at, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+			workno, asmrone_id, title, circle_id, circle_name, release_date, create_date,
+			age_category, work_type, series_id, series_name, price, file_size, duration,
+			has_subtitle, rating, rate_count, review_count, dl_count, cover_path, cover_url,
+			sam_cover_url, thumbnail_cover_url, original_workno, source_type, source_url,
+			work_attributes, language_editions_json, other_editions_json, translation_info_json,
+			rate_detail_json, rank_json, needs_rescrape, scraped_at, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
 		ON CONFLICT(workno) DO UPDATE SET
-			title          = excluded.title,
-			circle_id      = CASE WHEN excluded.circle_id != '' THEN excluded.circle_id ELSE work.circle_id END,
-			circle_name    = CASE WHEN excluded.circle_name != '' THEN excluded.circle_name ELSE work.circle_name END,
-			release_date   = CASE WHEN excluded.release_date != '' THEN excluded.release_date ELSE work.release_date END,
-			age_category   = CASE WHEN excluded.age_category > 0 THEN excluded.age_category ELSE work.age_category END,
-			work_type      = CASE WHEN excluded.work_type != '' THEN excluded.work_type ELSE work.work_type END,
-			series_id      = CASE WHEN excluded.series_id != '' THEN excluded.series_id ELSE work.series_id END,
-			series_name    = CASE WHEN excluded.series_name != '' THEN excluded.series_name ELSE work.series_name END,
-			price          = CASE WHEN excluded.price > 0 THEN excluded.price ELSE work.price END,
-			file_size      = CASE WHEN excluded.file_size > 0 THEN excluded.file_size ELSE work.file_size END,
-			rating         = CASE WHEN excluded.rating > 0 THEN excluded.rating ELSE work.rating END,
-			rate_count     = CASE WHEN excluded.rate_count > 0 THEN excluded.rate_count ELSE work.rate_count END,
-			review_count   = CASE WHEN excluded.review_count > 0 THEN excluded.review_count ELSE work.review_count END,
-			dl_count       = CASE WHEN excluded.dl_count > 0 THEN excluded.dl_count ELSE work.dl_count END,
-			cover_path     = ?,
-			cover_url      = CASE WHEN excluded.cover_url != '' THEN excluded.cover_url ELSE work.cover_url END,
-			needs_rescrape = 0,
-			scraped_at     = excluded.scraped_at
+			asmrone_id             = CASE WHEN excluded.asmrone_id > 0 THEN excluded.asmrone_id ELSE work.asmrone_id END,
+			title                  = excluded.title,
+			circle_id              = CASE WHEN excluded.circle_id != '' THEN excluded.circle_id ELSE work.circle_id END,
+			circle_name            = CASE WHEN excluded.circle_name != '' THEN excluded.circle_name ELSE work.circle_name END,
+			release_date           = CASE WHEN excluded.release_date != '' THEN excluded.release_date ELSE work.release_date END,
+			create_date            = CASE WHEN excluded.create_date != '' THEN excluded.create_date ELSE work.create_date END,
+			age_category           = CASE WHEN excluded.age_category > 0 THEN excluded.age_category ELSE work.age_category END,
+			work_type              = CASE WHEN excluded.work_type != '' THEN excluded.work_type ELSE work.work_type END,
+			series_id              = CASE WHEN excluded.series_id != '' THEN excluded.series_id ELSE work.series_id END,
+			series_name            = CASE WHEN excluded.series_name != '' THEN excluded.series_name ELSE work.series_name END,
+			price                  = CASE WHEN excluded.price > 0 THEN excluded.price ELSE work.price END,
+			file_size              = CASE WHEN excluded.file_size > 0 THEN excluded.file_size ELSE work.file_size END,
+			duration               = CASE WHEN excluded.duration > 0 THEN excluded.duration ELSE work.duration END,
+			has_subtitle           = CASE WHEN excluded.has_subtitle > 0 THEN 1 ELSE work.has_subtitle END,
+			rating                 = CASE WHEN excluded.rating > 0 THEN excluded.rating ELSE work.rating END,
+			rate_count             = CASE WHEN excluded.rate_count > 0 THEN excluded.rate_count ELSE work.rate_count END,
+			review_count           = CASE WHEN excluded.review_count > 0 THEN excluded.review_count ELSE work.review_count END,
+			dl_count               = CASE WHEN excluded.dl_count > 0 THEN excluded.dl_count ELSE work.dl_count END,
+			cover_path             = ?,
+			cover_url              = CASE WHEN excluded.cover_url != '' THEN excluded.cover_url ELSE work.cover_url END,
+			sam_cover_url          = CASE WHEN excluded.sam_cover_url != '' THEN excluded.sam_cover_url ELSE work.sam_cover_url END,
+			thumbnail_cover_url    = CASE WHEN excluded.thumbnail_cover_url != '' THEN excluded.thumbnail_cover_url ELSE work.thumbnail_cover_url END,
+			original_workno        = CASE WHEN excluded.original_workno != '' THEN excluded.original_workno ELSE work.original_workno END,
+			source_type            = CASE WHEN excluded.source_type != '' THEN excluded.source_type ELSE work.source_type END,
+			source_url             = CASE WHEN excluded.source_url != '' THEN excluded.source_url ELSE work.source_url END,
+			work_attributes        = CASE WHEN excluded.work_attributes != '' THEN excluded.work_attributes ELSE work.work_attributes END,
+			language_editions_json = CASE WHEN excluded.language_editions_json != '' THEN excluded.language_editions_json ELSE work.language_editions_json END,
+			other_editions_json    = CASE WHEN excluded.other_editions_json != '' THEN excluded.other_editions_json ELSE work.other_editions_json END,
+			translation_info_json  = CASE WHEN excluded.translation_info_json != '' THEN excluded.translation_info_json ELSE work.translation_info_json END,
+			rate_detail_json       = CASE WHEN excluded.rate_detail_json != '' THEN excluded.rate_detail_json ELSE work.rate_detail_json END,
+			rank_json              = CASE WHEN excluded.rank_json != '' THEN excluded.rank_json ELSE work.rank_json END,
+			needs_rescrape         = 0,
+			scraped_at             = excluded.scraped_at
 	`,
-		wno, title, meta.CircleID, meta.CircleName, meta.ReleaseDate, meta.AgeCategory,
-		meta.WorkType, meta.SeriesID, meta.SeriesName, meta.Price, meta.FileSize, meta.Rating,
-		meta.RateCount, meta.ReviewCount, meta.DLCount, coverToSet, meta.CoverURL,
-		now, time.Now().Unix(), coverToSet,
+		wno, meta.AsmrOneID, title, meta.CircleID, meta.CircleName, meta.ReleaseDate, meta.CreateDate,
+		meta.AgeCategory, meta.WorkType, meta.SeriesID, meta.SeriesName, meta.Price, meta.FileSize, meta.Duration,
+		hasSubInt, meta.Rating, meta.RateCount, meta.ReviewCount, meta.DLCount, coverToSet, meta.CoverURL,
+		meta.SamCoverURL, meta.ThumbnailCoverURL, meta.OriginalWorkno, meta.SourceType, meta.SourceURL,
+		meta.WorkAttributes, meta.LanguageEditionsJSON, meta.OtherEditionsJSON, meta.TranslationInfoJSON,
+		meta.RateDetailJSON, meta.RankJSON, now, time.Now().Unix(), coverToSet,
 	)
 	if err != nil {
-		return err
+		return alreadyExisted, err
 	}
 
-	// Replace persons by role
-	if _, err := tx.ExecContext(ctx, `DELETE FROM work_person WHERE workno = ?`, wno); err != nil {
-		return err
-	}
 	roleMap := []struct {
 		role  string
 		names []string
@@ -457,6 +540,12 @@ func (s *Store) SaveMetadata(ctx context.Context, meta *dlsite.Metadata, downloa
 		{"music", meta.Musics},
 	}
 	for _, rg := range roleMap {
+		if len(rg.names) == 0 {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM work_person WHERE workno = ? AND role = ?`, wno, rg.role); err != nil {
+			return alreadyExisted, err
+		}
 		for _, rawName := range rg.names {
 			name := strings.TrimSpace(rawName)
 			if name == "" {
@@ -464,35 +553,36 @@ func (s *Store) SaveMetadata(ctx context.Context, meta *dlsite.Metadata, downloa
 			}
 			pid, err := upsertPersonTx(ctx, tx, name)
 			if err != nil {
-				return err
+				return alreadyExisted, err
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO work_person (workno, person_id, role) VALUES (?, ?, ?)`, wno, pid, rg.role); err != nil {
-				return err
+				return alreadyExisted, err
 			}
 		}
 	}
 
-	// Replace only DLsite tags (`source = 'dlsite'`), keeping user tags untouched!
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM work_tag WHERE workno = ? AND tag_id IN (SELECT id FROM tag WHERE source = 'dlsite')
-	`, wno); err != nil {
-		return err
-	}
-	for _, rawTag := range meta.Tags {
-		tname := strings.TrimSpace(rawTag)
-		if tname == "" {
-			continue
+	if len(meta.Tags) > 0 {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM work_tag WHERE workno = ? AND tag_id IN (SELECT id FROM tag WHERE source = 'dlsite')
+		`, wno); err != nil {
+			return alreadyExisted, err
 		}
-		tid, err := upsertTagTx(ctx, tx, tname, "dlsite")
-		if err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO work_tag (workno, tag_id) VALUES (?, ?)`, wno, tid); err != nil {
-			return err
+		for _, rawTag := range meta.Tags {
+			tname := strings.TrimSpace(rawTag)
+			if tname == "" {
+				continue
+			}
+			tid, err := upsertTagTx(ctx, tx, tname, "dlsite")
+			if err != nil {
+				return alreadyExisted, err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO work_tag (workno, tag_id) VALUES (?, ?)`, wno, tid); err != nil {
+				return alreadyExisted, err
+			}
 		}
 	}
 
-	return tx.Commit()
+	return alreadyExisted, nil
 }
 
 func upsertPersonTx(ctx context.Context, tx *sql.Tx, name string) (int64, error) {
@@ -604,6 +694,9 @@ func (s *Store) ListWorks(ctx context.Context, opts ListWorksOptions) ([]Work, i
 		)`)
 		args = append(args, opts.StorageID)
 	}
+	if opts.SubtitleOnly {
+		where = append(where, `COALESCE(w.has_subtitle, 0) = 1`)
+	}
 	if opts.Worknos != nil {
 		if len(opts.Worknos) == 0 {
 			return []Work{}, 0, nil
@@ -662,12 +755,14 @@ func (s *Store) ListWorks(ctx context.Context, opts ListWorksOptions) ([]Work, i
 
 	listQuery := fmt.Sprintf(`
 		SELECT
-			w.workno, w.title, COALESCE(w.circle_id, ''), COALESCE(w.circle_name, ''),
-			COALESCE(w.release_date, ''), COALESCE(w.age_category, 0), COALESCE(w.work_type, ''),
+			w.workno, COALESCE(w.asmrone_id, 0), w.title, COALESCE(w.circle_id, ''), COALESCE(w.circle_name, ''),
+			COALESCE(w.release_date, ''), COALESCE(w.create_date, ''), COALESCE(w.age_category, 0), COALESCE(w.work_type, ''),
 			COALESCE(w.series_id, ''), COALESCE(w.series_name, ''), COALESCE(w.price, 0),
-			COALESCE(w.file_size, 0), COALESCE(w.rating, 0), COALESCE(w.rate_count, 0),
+			COALESCE(w.file_size, 0), COALESCE(w.duration, 0), COALESCE(w.has_subtitle, 0),
+			COALESCE(w.rating, 0), COALESCE(w.rate_count, 0),
 			COALESCE(w.review_count, 0), COALESCE(w.dl_count, 0), COALESCE(w.cover_path, ''),
-			COALESCE(w.cover_url, ''), COALESCE(w.needs_rescrape, 0), COALESCE(w.scraped_at, 0),
+			COALESCE(w.cover_url, ''), COALESCE(w.sam_cover_url, ''), COALESCE(w.thumbnail_cover_url, ''),
+			COALESCE(w.original_workno, ''), COALESCE(w.needs_rescrape, 0), COALESCE(w.scraped_at, 0),
 			COALESCE(w.created_at, 0),
 			us.rating, COALESCE(us.progress, ''),
 			(SELECT COUNT(*) FROM track tr WHERE tr.workno = w.workno)
@@ -687,20 +782,23 @@ func (s *Store) ListWorks(ctx context.Context, opts ListWorksOptions) ([]Work, i
 	idxByWorkno := make(map[string]int)
 	for rows.Next() {
 		var w Work
-		var needs int
+		var needs, hasSub int
 		var uRating sql.NullInt64
 		if err := rows.Scan(
-			&w.Workno, &w.Title, &w.CircleID, &w.CircleName,
-			&w.ReleaseDate, &w.AgeCategory, &w.WorkType,
+			&w.Workno, &w.AsmrOneID, &w.Title, &w.CircleID, &w.CircleName,
+			&w.ReleaseDate, &w.CreateDate, &w.AgeCategory, &w.WorkType,
 			&w.SeriesID, &w.SeriesName, &w.Price,
-			&w.FileSize, &w.Rating, &w.RateCount,
+			&w.FileSize, &w.Duration, &hasSub,
+			&w.Rating, &w.RateCount,
 			&w.ReviewCount, &w.DLCount, &w.CoverPath,
-			&w.CoverURL, &needs, &w.ScrapedAt,
+			&w.CoverURL, &w.SamCoverURL, &w.ThumbnailCoverURL,
+			&w.OriginalWorkno, &needs, &w.ScrapedAt,
 			&w.CreatedAt, &uRating, &w.Progress, &w.TrackCount,
 		); err != nil {
 			rows.Close()
 			return nil, 0, err
 		}
+		w.HasSubtitle = hasSub != 0
 		w.NeedsRescrape = needs != 0
 		if uRating.Valid {
 			r := int(uRating.Int64)
@@ -790,24 +888,35 @@ func (s *Store) GetWorkDetail(ctx context.Context, workno string, userID int64) 
 	}
 
 	var d WorkDetail
-	var needs int
+	var needs, hasSub int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT
-			workno, title, COALESCE(circle_id, ''), COALESCE(circle_name, ''),
-			COALESCE(release_date, ''), COALESCE(age_category, 0), COALESCE(work_type, ''),
+			workno, COALESCE(asmrone_id, 0), title, COALESCE(circle_id, ''), COALESCE(circle_name, ''),
+			COALESCE(release_date, ''), COALESCE(create_date, ''), COALESCE(age_category, 0), COALESCE(work_type, ''),
 			COALESCE(series_id, ''), COALESCE(series_name, ''), COALESCE(price, 0),
-			COALESCE(file_size, 0), COALESCE(rating, 0), COALESCE(rate_count, 0),
+			COALESCE(file_size, 0), COALESCE(duration, 0), COALESCE(has_subtitle, 0),
+			COALESCE(rating, 0), COALESCE(rate_count, 0),
 			COALESCE(review_count, 0), COALESCE(dl_count, 0), COALESCE(cover_path, ''),
-			COALESCE(cover_url, ''), COALESCE(needs_rescrape, 0), COALESCE(scraped_at, 0),
-			COALESCE(created_at, 0)
+			COALESCE(cover_url, ''), COALESCE(sam_cover_url, ''), COALESCE(thumbnail_cover_url, ''),
+			COALESCE(original_workno, ''), COALESCE(source_type, ''), COALESCE(source_url, ''),
+			COALESCE(work_attributes, ''), COALESCE(language_editions_json, ''), COALESCE(other_editions_json, ''),
+			COALESCE(translation_info_json, ''), COALESCE(rate_detail_json, ''), COALESCE(rank_json, ''),
+			COALESCE(remote_files_json, ''),
+			COALESCE(needs_rescrape, 0), COALESCE(scraped_at, 0), COALESCE(created_at, 0)
 		FROM work WHERE workno = ?
 	`, wno).Scan(
-		&d.Workno, &d.Title, &d.CircleID, &d.CircleName,
-		&d.ReleaseDate, &d.AgeCategory, &d.WorkType,
+		&d.Workno, &d.AsmrOneID, &d.Title, &d.CircleID, &d.CircleName,
+		&d.ReleaseDate, &d.CreateDate, &d.AgeCategory, &d.WorkType,
 		&d.SeriesID, &d.SeriesName, &d.Price,
-		&d.FileSize, &d.Rating, &d.RateCount,
+		&d.FileSize, &d.Duration, &hasSub,
+		&d.Rating, &d.RateCount,
 		&d.ReviewCount, &d.DLCount, &d.CoverPath,
-		&d.CoverURL, &needs, &d.ScrapedAt, &d.CreatedAt,
+		&d.CoverURL, &d.SamCoverURL, &d.ThumbnailCoverURL,
+		&d.OriginalWorkno, &d.SourceType, &d.SourceURL,
+		&d.WorkAttributes, &d.LanguageEditionsJSON, &d.OtherEditionsJSON,
+		&d.TranslationInfoJSON, &d.RateDetailJSON, &d.RankJSON,
+		&d.RemoteFilesJSON,
+		&needs, &d.ScrapedAt, &d.CreatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -815,6 +924,7 @@ func (s *Store) GetWorkDetail(ctx context.Context, workno string, userID int64) 
 	if err != nil {
 		return nil, err
 	}
+	d.HasSubtitle = hasSub != 0
 	d.NeedsRescrape = needs != 0
 	d.VAs = []string{}
 	d.Scenarios = []string{}
@@ -888,26 +998,35 @@ func (s *Store) GetWorkDetail(ctx context.Context, workno string, userID int64) 
 	}
 	pathRows.Close()
 
-	// Tracks + play_position (§9.5)
+	// Tracks + play_position (§9.5) — prioritize local tracks over remote tracks if both exist!
 	trRows, err := s.db.QueryContext(ctx, `
 		SELECT
 			tr.id, tr.workno, tr.storage_id, tr.work_rel, tr.rel_path,
 			COALESCE(tr.size, 0), tr.duration, COALESCE(tr.ord, 0),
-			COALESCE(pp.position, 0)
+			COALESCE(pp.position, 0),
+			COALESCE(tr.stream_url, ''), COALESCE(tr.download_url, ''),
+			COALESCE(tr.stream_low_url, ''), COALESCE(tr.subtitle_url, ''),
+			COALESCE(tr.remote_hash, ''), COALESCE(st.kind, 'local')
 		FROM track tr
+		LEFT JOIN storage st ON st.id = tr.storage_id
 		LEFT JOIN play_position pp ON pp.track_id = tr.id AND pp.user_id = ?
 		WHERE tr.workno = ?
-		ORDER BY tr.ord ASC, tr.rel_path ASC
+		ORDER BY CASE WHEN COALESCE(st.kind, 'local') = 'local' THEN 0 ELSE 1 END, tr.ord ASC, tr.rel_path ASC
 	`, userID, wno)
 	if err != nil {
 		return nil, err
 	}
+	hasLocalTracks := false
+	var allFetched []Track
 	for trRows.Next() {
 		var tr Track
 		var dur sql.NullFloat64
+		var stKind string
 		if err := trRows.Scan(
 			&tr.ID, &tr.Workno, &tr.StorageID, &tr.WorkRel, &tr.RelPath,
 			&tr.Size, &dur, &tr.Ord, &tr.PlayPosition,
+			&tr.StreamURL, &tr.DownloadURL, &tr.StreamLowURL, &tr.SubtitleURL,
+			&tr.RemoteHash, &stKind,
 		); err != nil {
 			trRows.Close()
 			return nil, err
@@ -916,9 +1035,24 @@ func (s *Store) GetWorkDetail(ctx context.Context, workno string, userID int64) 
 			v := dur.Float64
 			tr.Duration = &v
 		}
-		d.Tracks = append(d.Tracks, tr)
+		tr.IsRemote = stKind == "asmrone" || tr.StreamURL != ""
+		if !tr.IsRemote {
+			hasLocalTracks = true
+		}
+		if tr.SubtitleURL != "" {
+			tr.HasSubtitle = true
+		}
+		allFetched = append(allFetched, tr)
 	}
 	trRows.Close()
+
+	// If local audio files exist for this work, show local tracks so local storage always wins; otherwise show remote tracks.
+	for _, tr := range allFetched {
+		if hasLocalTracks && tr.IsRemote {
+			continue
+		}
+		d.Tracks = append(d.Tracks, tr)
+	}
 	d.TrackCount = len(d.Tracks)
 	d.Tree = BuildTrackTree(d.Tracks)
 
@@ -1026,13 +1160,18 @@ func (s *Store) ResolveTrack(ctx context.Context, trackID int64) (*ResolvedTrack
 		SELECT
 			tr.id, tr.workno, tr.storage_id, tr.work_rel, tr.rel_path,
 			COALESCE(tr.size, 0), tr.duration, COALESCE(tr.ord, 0),
+			COALESCE(tr.stream_url, ''), COALESCE(tr.download_url, ''),
+			COALESCE(tr.stream_low_url, ''), COALESCE(tr.subtitle_url, ''),
+			COALESCE(tr.remote_hash, ''),
 			COALESCE(st.kind, 'local'), COALESCE(st.root, '')
 		FROM track tr
 		LEFT JOIN storage st ON st.id = tr.storage_id
 		WHERE tr.id = ?
 	`, trackID).Scan(
 		&rt.ID, &rt.Workno, &rt.StorageID, &rt.WorkRel, &rt.RelPath,
-		&rt.Size, &dur, &rt.Ord, &rt.StorageKind, &rt.StorageRoot,
+		&rt.Size, &dur, &rt.Ord,
+		&rt.StreamURL, &rt.DownloadURL, &rt.StreamLowURL, &rt.SubtitleURL, &rt.RemoteHash,
+		&rt.StorageKind, &rt.StorageRoot,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -1044,7 +1183,99 @@ func (s *Store) ResolveTrack(ctx context.Context, trackID int64) (*ResolvedTrack
 		v := dur.Float64
 		rt.Duration = &v
 	}
+	rt.IsRemote = rt.StorageKind == "asmrone" || rt.StreamURL != ""
 	return &rt, nil
+}
+
+// RemoteTrackInput represents a remote track discovered from asmr.one /api/tracks/{id}.
+type RemoteTrackInput struct {
+	RelPath      string
+	Size         int64
+	Duration     float64
+	Ord          int
+	RemoteHash   string
+	StreamURL    string
+	DownloadURL  string
+	StreamLowURL string
+	SubtitleURL  string
+}
+
+// SaveRemoteTracks persists remote asmr.one audio tracks and bonus file JSON under a dedicated
+// `kind = 'asmrone'` storage without touching any local storage tracks.
+func (s *Store) SaveRemoteTracks(ctx context.Context, workno string, tracks []RemoteTrackInput, remoteFilesJSON string) error {
+	wno := dlsite.NormalizeWorkno(workno)
+	if wno == "" {
+		return fmt.Errorf("invalid workno %q", workno)
+	}
+	st, err := s.UpsertStorage(ctx, "asmrone", "asmr.one", "https://asmr.one", `{"remote":true}`)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	hasSub := 0
+	seenRel := make(map[string]bool, len(tracks))
+	for _, tr := range tracks {
+		seenRel[tr.RelPath] = true
+		if tr.SubtitleURL != "" {
+			hasSub = 1
+		}
+		var durArg any
+		if tr.Duration > 0 {
+			durArg = tr.Duration
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO track (
+				workno, storage_id, work_rel, rel_path, size, duration, ord,
+				stream_url, download_url, stream_low_url, subtitle_url, remote_hash
+			) VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(workno, storage_id, work_rel, rel_path) DO UPDATE SET
+				size           = excluded.size,
+				duration       = COALESCE(excluded.duration, track.duration),
+				ord            = excluded.ord,
+				stream_url     = excluded.stream_url,
+				download_url   = excluded.download_url,
+				stream_low_url = excluded.stream_low_url,
+				subtitle_url   = excluded.subtitle_url,
+				remote_hash    = excluded.remote_hash
+		`, wno, st.ID, tr.RelPath, tr.Size, durArg, tr.Ord, tr.StreamURL, tr.DownloadURL, tr.StreamLowURL, tr.SubtitleURL, tr.RemoteHash); err != nil {
+			return err
+		}
+	}
+
+	// Prune removed remote tracks for this work while keeping track IDs stable for play_position!
+	rows, err := tx.QueryContext(ctx, `SELECT id, rel_path FROM track WHERE workno = ? AND storage_id = ?`, wno, st.ID)
+	if err != nil {
+		return err
+	}
+	var staleIDs []int64
+	for rows.Next() {
+		var id int64
+		var rp string
+		if rows.Scan(&id, &rp) == nil && !seenRel[rp] {
+			staleIDs = append(staleIDs, id)
+		}
+	}
+	rows.Close()
+	for _, id := range staleIDs {
+		_, _ = tx.ExecContext(ctx, `DELETE FROM track WHERE id = ?`, id)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE work SET
+			remote_files_json = ?,
+			has_subtitle = CASE WHEN ? = 1 THEN 1 ELSE has_subtitle END
+		WHERE workno = ?
+	`, remoteFilesJSON, hasSub, wno); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 func (rt *ResolvedTrack) AbsFilePath() string {

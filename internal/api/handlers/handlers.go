@@ -25,6 +25,7 @@ import (
 // TaskRunner abstracts background scan/scrape orchestration for API handlers.
 type TaskRunner interface {
 	TriggerScan(storageID int64, scrapeMetadata bool, forceScrape bool) (bool, error)
+	TriggerAsmrOneSync(opts scrape.SyncOptions) (bool, error)
 	Cancel() bool
 	ServeSSE(w http.ResponseWriter, r *http.Request)
 	SnapshotJSON() any
@@ -249,17 +250,18 @@ func (a *API) ListWorks(w http.ResponseWriter, r *http.Request) {
 	ageMode := a.effectiveAgeMode(r)
 
 	items, total, err := a.Store.ListWorks(r.Context(), db.ListWorksOptions{
-		UserID:    user.ID,
-		Page:      page,
-		PageSize:  pageSize,
-		SortBy:    q.Get("sort_by"),
-		SortDesc:  sortDesc,
-		AgeMode:   ageMode,
-		Circle:    q.Get("circle"),
-		VA:        q.Get("va"),
-		Tag:       q.Get("tag"),
-		Progress:  q.Get("progress"),
-		StorageID: storageID,
+		UserID:       user.ID,
+		Page:         page,
+		PageSize:     pageSize,
+		SortBy:       q.Get("sort_by"),
+		SortDesc:     sortDesc,
+		AgeMode:      ageMode,
+		Circle:       q.Get("circle"),
+		VA:           q.Get("va"),
+		Tag:          q.Get("tag"),
+		Progress:     q.Get("progress"),
+		StorageID:    storageID,
+		SubtitleOnly: q.Get("subtitle_only") == "1" || q.Get("subtitle_only") == "true",
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -302,15 +304,33 @@ func (a *API) GetWork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Annotate HasSubtitle on tracks & tree nodes (§8)
+	// Lazy-load remote tracks from asmr.one on first open if work has 0 local/cached tracks
+	if len(detail.Tracks) == 0 && a.Cfg.Snapshot().AsmrOneEnabled && r.URL.Query().Get("skip_remote_tracks") != "1" {
+		if asmrClient, cErr := scrape.NewAsmrOneClient(a.Cfg); cErr == nil {
+			if n, trErr := scrape.SyncWorkRemoteTracks(r.Context(), a.Store, asmrClient, detail.Workno, detail.AsmrOneID); trErr == nil && n > 0 {
+				if refreshed, rErr := a.Store.GetWorkDetail(r.Context(), workno, user.ID); rErr == nil {
+					detail = refreshed
+				}
+			}
+		}
+	}
+
+	// Annotate HasSubtitle on local tracks & tree nodes (§8)
 	storages, _ := a.Store.ListStorages(r.Context())
 	rootByID := make(map[int64]string, len(storages))
 	for _, st := range storages {
-		rootByID[st.ID] = st.Root
+		if st.Kind == "local" {
+			rootByID[st.ID] = st.Root
+		}
 	}
 	hasSubByTrackID := make(map[int64]bool, len(detail.Tracks))
 	for i := range detail.Tracks {
 		tr := &detail.Tracks[i]
+		if tr.IsRemote {
+			tr.HasSubtitle = tr.SubtitleURL != ""
+			hasSubByTrackID[tr.ID] = tr.HasSubtitle
+			continue
+		}
 		if stRoot := rootByID[tr.StorageID]; stRoot != "" {
 			absAudio := filepath.Join(stRoot, filepath.FromSlash(tr.WorkRel), filepath.FromSlash(tr.RelPath))
 			tr.HasSubtitle = subtitle.FindMatchingSubtitle(absAudio) != ""
@@ -320,6 +340,31 @@ func (a *API) GetWork(w http.ResponseWriter, r *http.Request) {
 	annotateTreeSubtitles(detail.Tree, hasSubByTrackID)
 
 	writeJSON(w, http.StatusOK, detail)
+}
+
+func (a *API) SyncWorkTracks(w http.ResponseWriter, r *http.Request) {
+	user := UserFromContext(r.Context())
+	workno := dlsite.NormalizeWorkno(r.PathValue("workno"))
+	if workno == "" {
+		writeErr(w, http.StatusBadRequest, "invalid workno")
+		return
+	}
+	detail, err := a.Store.GetWorkDetail(r.Context(), workno, user.ID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "work not found")
+		return
+	}
+	asmrClient, err := scrape.NewAsmrOneClient(a.Cfg)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := scrape.SyncWorkRemoteTracks(r.Context(), a.Store, asmrClient, workno, detail.AsmrOneID); err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	refreshed, _ := a.Store.GetWorkDetail(r.Context(), workno, user.ID)
+	writeJSON(w, http.StatusOK, refreshed)
 }
 
 func annotateTreeSubtitles(nodes []*db.TrackTreeNode, subMap map[int64]bool) {
@@ -519,6 +564,10 @@ func (a *API) StreamTrack(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if rt.IsRemote && rt.StreamURL != "" {
+		_ = stream.ProxyRemoteAudio(w, r, rt.StreamURL, rt.RelPath, a.Cfg.Snapshot().ScraperProxy)
+		return
+	}
 	_ = stream.ServeAudioFile(w, r, rt.AbsFilePath())
 }
 
@@ -530,6 +579,22 @@ func (a *API) GetCover(w http.ResponseWriter, r *http.Request) {
 		if st, statErr := os.Stat(detail.CoverPath); statErr == nil && !st.IsDir() {
 			http.ServeFile(w, r, detail.CoverPath)
 			return
+		}
+	}
+	// On-demand remote cover fetch & local disk cache for synced catalog works
+	if err == nil {
+		remoteCover := detail.CoverURL
+		if r.URL.Query().Get("thumb") == "1" && detail.ThumbnailCoverURL != "" {
+			remoteCover = detail.ThumbnailCoverURL
+		}
+		if remoteCover != "" {
+			if client, cErr := scrape.NewClient(a.Cfg, nil, time.Millisecond); cErr == nil {
+				if savedPath, dErr := client.DownloadCover(r.Context(), workno, remoteCover); dErr == nil && savedPath != "" {
+					_, _ = a.Store.DB().ExecContext(r.Context(), `UPDATE work SET cover_path = ? WHERE workno = ? AND COALESCE(cover_path, '') = ''`, savedPath, workno)
+					http.ServeFile(w, r, savedPath)
+					return
+				}
+			}
 		}
 	}
 	// Clean minimal SVG placeholder when offline / no cover image present
@@ -553,6 +618,30 @@ func (a *API) GetSubtitle(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if rt.IsRemote {
+		if rt.SubtitleURL == "" {
+			writeJSON(w, http.StatusOK, map[string]any{"found": false, "cues": []subtitle.Cue{}})
+			return
+		}
+		raw, fErr := fetchRemoteBytes(r, rt.SubtitleURL, a.Cfg.Snapshot().ScraperProxy)
+		if fErr != nil {
+			writeErr(w, http.StatusBadGateway, fErr.Error())
+			return
+		}
+		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(strings.Split(rt.SubtitleURL, "?")[0])), ".")
+		if ext == "" {
+			ext = "lrc"
+		}
+		parsed := subtitle.ParseBytes(raw, filepath.Base(rt.SubtitleURL), ext)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"found":    true,
+			"format":   parsed.Format,
+			"encoding": parsed.Encoding,
+			"file":     parsed.FileName,
+			"cues":     parsed.Cues,
+		})
+		return
+	}
 	subPath := subtitle.FindMatchingSubtitle(rt.AbsFilePath())
 	if subPath == "" {
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -573,6 +662,30 @@ func (a *API) GetSubtitle(w http.ResponseWriter, r *http.Request) {
 		"file":     parsed.FileName,
 		"cues":     parsed.Cues,
 	})
+}
+
+func fetchRemoteBytes(r *http.Request, targetURL, proxyURL string) ([]byte, error) {
+	tr, err := dlsite.BuildHTTPTransport(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Transport: tr, Timeout: 20 * time.Second}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Otoha/1.0; +https://github.com/SiIverAsh/Otoha)")
+	req.Header.Set("Referer", "https://asmr.one/")
+	req.Header.Set("Origin", "https://asmr.one")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("upstream HTTP %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 }
 
 // --- Storages, Scan, Tasks ---
@@ -653,6 +766,48 @@ func (a *API) GetTasks(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) StreamTaskEvents(w http.ResponseWriter, r *http.Request) {
 	a.Tasks.ServeSSE(w, r)
+}
+
+func (a *API) TriggerAsmrOneSync(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		PageSize        int    `json:"page_size"`
+		StartPage       int    `json:"start_page"`
+		MaxPages        int    `json:"max_pages"`
+		Order           string `json:"order"`
+		Sort            string `json:"sort"`
+		SubtitleOnly    bool   `json:"subtitle_only"`
+		IncludeTracks   bool   `json:"include_tracks"`
+		ResetCheckpoint bool   `json:"reset_checkpoint"`
+	}
+	_ = decodeBody(r, &req)
+	started, err := a.Tasks.TriggerAsmrOneSync(scrape.SyncOptions{
+		PageSize:        req.PageSize,
+		StartPage:       req.StartPage,
+		MaxPages:        req.MaxPages,
+		Order:           req.Order,
+		Sort:            req.Sort,
+		SubtitleOnly:    req.SubtitleOnly,
+		IncludeTracks:   req.IncludeTracks,
+		ResetCheckpoint: req.ResetCheckpoint,
+	})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	cp, _ := scrape.LoadSyncCheckpoint(a.Cfg)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"started":    started,
+		"task":       a.Tasks.SnapshotJSON(),
+		"checkpoint": cp,
+	})
+}
+
+func (a *API) GetAsmrOneSyncStatus(w http.ResponseWriter, r *http.Request) {
+	cp, _ := scrape.LoadSyncCheckpoint(a.Cfg)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"checkpoint": cp,
+		"task":       a.Tasks.SnapshotJSON(),
+	})
 }
 
 // --- Listen History & Privacy (§9.5 & §9.6) ---

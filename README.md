@@ -55,8 +55,11 @@ $env:CGO_ENABLED = "0"; $env:GOOS = "linux"; $env:GOARCH = "arm64"; go build -o 
 # 离线扫描本地目录（不请求外网）
 .\otoha.exe scan --data .\data --root "D:\VOICES" --name Voices
 
-# 扫描并抓取 DLsite 公开元数据（支持带账密的 HTTP / SOCKS5 代理，3 秒礼貌限速，支持 Ctrl+C 断点续传）
+# 扫描并抓取公开元数据（支持带账密的 HTTP / SOCKS5 代理，3 秒礼貌限速，支持 Ctrl+C 断点续传）
 .\otoha.exe scan --data .\data --root "D:\VOICES" --scrape --proxy "socks5://user:pass@127.0.0.1:1080"
+
+# 增量断点同步 asmr.one 全站目录（按页实时入库 SQLite + Bleve，精确记录 next_page 断点、去重跳过与字段完整率）
+.\otoha.exe sync-asmrone --data .\data --page-size 100 --order id --sort asc
 
 # 启动流媒体与 Web 服务（默认监听 http://127.0.0.1:8090，只读 WebDAV 挂载于 /dav/）
 .\otoha.exe serve --addr 127.0.0.1:8090 --data .\data

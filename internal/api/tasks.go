@@ -20,17 +20,18 @@ import (
 
 // TaskSnapshot represents the current scan/scrape background job state for REST and SSE (§9).
 type TaskSnapshot struct {
-	Running       bool                  `json:"running"`
-	Phase         string                `json:"phase"` // "idle" | "scanning" | "scraping" | "reindexing" | "done" | "cancelled" | "error"
-	Message       string                `json:"message"`
-	WorksScanned  int                   `json:"works_scanned"`
-	TracksScanned int                   `json:"tracks_scanned"`
-	ScrapeCurrent int                   `json:"scrape_current"`
-	ScrapeTotal   int                   `json:"scrape_total"`
-	CurrentWorkno string                `json:"current_workno,omitempty"`
-	Skipped       []scanner.SkippedPath `json:"skipped,omitempty"`
-	StartedAt     int64                 `json:"started_at,omitempty"`
-	UpdatedAt     int64                 `json:"updated_at"`
+	Running       bool                          `json:"running"`
+	Phase         string                        `json:"phase"` // "idle" | "scanning" | "scraping" | "syncing_asmrone" | "done" | "cancelled" | "error"
+	Message       string                        `json:"message"`
+	WorksScanned  int                           `json:"works_scanned"`
+	TracksScanned int                           `json:"tracks_scanned"`
+	ScrapeCurrent int                           `json:"scrape_current"`
+	ScrapeTotal   int                           `json:"scrape_total"`
+	CurrentWorkno string                        `json:"current_workno,omitempty"`
+	Skipped       []scanner.SkippedPath         `json:"skipped,omitempty"`
+	AsmrSync      *scrape.AsmrOneSyncCheckpoint `json:"asmr_sync,omitempty"`
+	StartedAt     int64                         `json:"started_at,omitempty"`
+	UpdatedAt     int64                         `json:"updated_at"`
 }
 
 // TaskManager coordinates background library scan, DLsite metadata scraping, and SSE broadcasting.
@@ -124,6 +125,86 @@ func (tm *TaskManager) TriggerScan(storageID int64, scrapeMetadata bool, forceSc
 	tm.mu.Unlock()
 
 	go tm.runScanPipeline(ctx, storageID, scrapeMetadata, forceScrape)
+	return true, nil
+}
+
+// TriggerAsmrOneSync launches an asynchronous, checkpoint-resumable full catalog sync from asmr.one.
+func (tm *TaskManager) TriggerAsmrOneSync(opts scrape.SyncOptions) (bool, error) {
+	tm.mu.Lock()
+	if tm.state.Running {
+		tm.mu.Unlock()
+		return false, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	tm.cancelFn = cancel
+	tm.state = TaskSnapshot{
+		Running:   true,
+		Phase:     "syncing_asmrone",
+		Message:   "正在启动 asmr.one 全量目录断点同步...",
+		StartedAt: time.Now().Unix(),
+		UpdatedAt: time.Now().Unix(),
+	}
+	tm.mu.Unlock()
+
+	go func() {
+		defer func() {
+			tm.mu.Lock()
+			tm.state.Running = false
+			tm.cancelFn = nil
+			tm.mu.Unlock()
+		}()
+
+		cp, err := scrape.SyncAsmrOneCatalog(ctx, tm.store, tm.search, tm.cfg, opts, func(p scrape.AsmrOneSyncCheckpoint) {
+			cpCopy := p
+			tm.publish(func(s *TaskSnapshot) {
+				s.Phase = "syncing_asmrone"
+				s.ScrapeCurrent = p.CurrentPage
+				s.ScrapeTotal = p.TotalPages
+				s.WorksScanned = p.Processed
+				s.TracksScanned = p.TracksSynced
+				s.AsmrSync = &cpCopy
+				s.Message = fmt.Sprintf(
+					"asmr.one 同步 第 %d/%d 页 · 新增 %d / 重复跳过 %d / 失败 %d · %.1f 部/s (ETA %ds)",
+					p.CurrentPage, p.TotalPages, p.Inserted, p.Duplicates, p.Failures, p.WorksPerSec, p.ETASeconds,
+				)
+			})
+		})
+		if errors.Is(err, context.Canceled) {
+			tm.publish(func(s *TaskSnapshot) {
+				s.Running = false
+				s.Phase = "cancelled"
+				if cp != nil {
+					cpCopy := *cp
+					s.AsmrSync = &cpCopy
+					s.Message = fmt.Sprintf("同步已暂停在页码 %d（断点已保存，下次自动从第 %d 页续跑）", cp.CurrentPage, cp.NextPage)
+				} else {
+					s.Message = "同步已中断"
+				}
+			})
+			return
+		}
+		if err != nil {
+			tm.publish(func(s *TaskSnapshot) {
+				s.Running = false
+				s.Phase = "error"
+				if cp != nil {
+					cpCopy := *cp
+					s.AsmrSync = &cpCopy
+				}
+				s.Message = "asmr.one 同步出错: " + err.Error()
+			})
+			return
+		}
+		tm.publish(func(s *TaskSnapshot) {
+			s.Running = false
+			s.Phase = "done"
+			if cp != nil {
+				cpCopy := *cp
+				s.AsmrSync = &cpCopy
+				s.Message = fmt.Sprintf("asmr.one 同步完成：本轮累计处理 %d 部（新增 %d，重复跳过 %d，音轨 %d）", cp.Processed, cp.Inserted, cp.Duplicates, cp.TracksSynced)
+			}
+		})
+	}()
 	return true, nil
 }
 

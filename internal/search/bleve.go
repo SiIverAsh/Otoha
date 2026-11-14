@@ -116,6 +116,28 @@ func (e *Engine) IndexWork(doc db.SearchDocument) error {
 	return idx.Index(doc.Workno, doc)
 }
 
+// IndexWorkBatch indexes a slice of documents in a single Bleve batch for fast page syncs.
+func (e *Engine) IndexWorkBatch(docs []db.SearchDocument) error {
+	if len(docs) == 0 {
+		return nil
+	}
+	e.mu.RLock()
+	idx := e.idx
+	degraded := e.degraded
+	e.mu.RUnlock()
+	if degraded || idx == nil {
+		return nil
+	}
+	batch := idx.NewBatch()
+	for _, doc := range docs {
+		if doc.Workno == "" {
+			continue
+		}
+		_ = batch.Index(doc.Workno, doc)
+	}
+	return idx.Batch(batch)
+}
+
 // DeleteWork removes a work from Bleve.
 func (e *Engine) DeleteWork(workno string) error {
 	e.mu.RLock()

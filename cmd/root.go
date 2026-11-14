@@ -33,6 +33,8 @@ func Execute(args []string) error {
 		return runScan(args[1:])
 	case "reindex":
 		return runReindex(args[1:])
+	case "sync-asmrone":
+		return runSyncAsmrOne(args[1:])
 	case "import-kikoeru":
 		return runImportKikoeru(args[1:])
 	case "user":
@@ -57,6 +59,7 @@ func printUsage() {
 Usage:
   otoha [serve] [--addr 127.0.0.1:8090] [--data ./data]
   otoha scan [--data ./data] [--root <dir>] [--name <alias>] [--scrape] [--force]
+  otoha sync-asmrone [--data ./data] [--page-size 100] [--max-pages 0] [--include-tracks]
   otoha reindex [--data ./data]
   otoha import-kikoeru --db <path/to/kikoeru.sqlite3> [--covers <dir>] [--root-map alias=path] [--dry-run] [--report <file>]
   otoha user add --username <name> --password <pwd> [--admin] [--data ./data]

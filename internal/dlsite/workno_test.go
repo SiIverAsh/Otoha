@@ -71,11 +71,17 @@ func TestCircleAndSeriesExtraction(t *testing.T) {
 	if got := ExtractCircleID(s); got != "RG54321" {
 		t.Errorf("ExtractCircleID = %q, want RG54321", got)
 	}
+	if got := ExtractCircleID("RG01005704"); got != "RG01005704" {
+		t.Errorf("ExtractCircleID 8-digit = %q, want RG01005704", got)
+	}
 	if got := ExtractSeriesID(s); got != "SRI0000012345" {
 		t.Errorf("ExtractSeriesID = %q, want SRI0000012345", got)
 	}
 	if got := ExtractCircleID("ARG54321 RG123456"); got != "" {
 		t.Errorf("ExtractCircleID invalid = %q, want empty", got)
+	}
+	if got := NumericIDFromWorkno("RJ01683351"); got != 1683351 {
+		t.Errorf("NumericIDFromWorkno = %d, want 1683351", got)
 	}
 }
 

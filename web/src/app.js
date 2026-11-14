@@ -15,6 +15,7 @@ const state = {
   va: "",
   tag: "",
   progress: "",
+  subtitleOnly: false,
   page: 1,
   pageSize: 40,
 
@@ -27,6 +28,7 @@ const state = {
   storages: [],
   users: [],
   settings: null,
+  asmrCheckpoint: null,
 
   searchDegraded: false,
   searchWarning: "",
@@ -332,6 +334,9 @@ function connectTaskSSE() {
       const snap = JSON.parse(ev.data);
       const wasRunning = state.task.running;
       state.task = snap;
+      if (snap.asmr_sync) {
+        state.asmrCheckpoint = snap.asmr_sync;
+      }
       if (wasRunning && !snap.running) {
         loadWorks();
         loadFacets();
@@ -354,6 +359,7 @@ async function loadWorks() {
   if (state.va) params.set("va", state.va);
   if (state.tag) params.set("tag", state.tag);
   if (state.progress) params.set("progress", state.progress);
+  if (state.subtitleOnly) params.set("subtitle_only", "1");
 
   let data;
   if (state.query.trim()) {
@@ -393,9 +399,14 @@ async function loadHistoryTab() {
 }
 
 async function loadSettingsTab() {
-  const [settings, storages] = await Promise.all([api("/api/settings"), api("/api/storages")]);
+  const [settings, storages, asmrSt] = await Promise.all([
+    api("/api/settings"),
+    api("/api/storages"),
+    api("/api/asmrone/status").catch(() => ({ checkpoint: null })),
+  ]);
   state.settings = settings;
   state.storages = storages.items || [];
+  state.asmrCheckpoint = asmrSt.checkpoint || state.asmrCheckpoint;
   if (state.user && state.user.is_admin) {
     const u = await api("/api/users").catch(() => ({ items: [] }));
     state.users = u.items || [];
@@ -505,19 +516,36 @@ function renderTreeNodes(nodes, parentRel = "") {
     .join("");
 }
 
+function parseSafeJSON(raw, fallback) {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch (_) {
+    return fallback;
+  }
+}
+
 function renderDrawer() {
   const d = state.detail;
   if (!d) return "";
   const userTags = (d.tags || []).filter((t) => t.source === "user").map((t) => t.name);
   const dlsiteTags = (d.tags || []).filter((t) => t.source !== "user");
+  const langEditions = parseSafeJSON(d.language_editions_json, []);
+  const ranks = parseSafeJSON(d.rank_json, []);
+  const remoteAttachments = parseSafeJSON(d.remote_files_json, []);
+  const bestRank = Array.isArray(ranks) && ranks.length > 0 ? Math.min(...ranks.map((r) => r.rank || 9999)) : 0;
 
   return `
     <aside class="drawer">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <span class="mono">${esc(d.workno)} ${ageBadgeHTML(d.age_category)}</span>
+        <span class="mono">
+          ${esc(d.workno)} ${ageBadgeHTML(d.age_category)}
+          ${d.has_subtitle ? `<span class="badge badge-sfw">含字幕</span>` : ""}
+        </span>
         <div style="display:flex;gap:4px;">
-          <button data-action="toggle-edit-meta">${state.editingMeta ? "取消编辑" : "编辑元数据"}</button>
-          <button data-action="scrape-work" title="从 DLsite 重新抓取该作品元数据">刷新元数据</button>
+          <button data-action="sync-work-tracks" title="从 asmr.one 同步远端音轨树与字幕">同步音轨</button>
+          <button data-action="toggle-edit-meta">${state.editingMeta ? "取消编辑" : "编辑"}</button>
+          <button data-action="scrape-work" title="刷新该作品元数据">刷新</button>
           <button data-action="close-drawer">✕</button>
         </div>
       </div>
@@ -534,9 +562,23 @@ function renderDrawer() {
             ${(d.vas || []).length ? `CV：${d.vas.map((v) => `<a href="#" data-action="filter-va" data-val="${esc(v)}" style="color:#cbd5e1;margin-right:6px;">${esc(v)}</a>`).join("")}` : "CV：-"}
           </div>
           <div style="color:var(--muted);font-size:11px;margin-top:2px;" title="剧本: ${(d.scenarios || []).join(", ") || "-"} | 插画: ${(d.illusts || []).join(", ") || "-"} | 音乐: ${(d.musics || []).join(", ") || "-"}">
-            评分 ${d.rating ? d.rating.toFixed(2) : "-"} · 销量 ${d.dl_count || 0} · ¥${d.price || 0}
+            评分 ${d.rating ? d.rating.toFixed(2) : "-"} (${d.rate_count || 0}) · 销量 ${d.dl_count || 0} · ¥${d.price || 0}
+            ${d.duration ? ` · 时长 ${fmtSec(d.duration)}` : ""}
+            ${bestRank > 0 && bestRank < 9999 ? ` · 最高榜 #${bestRank}` : ""}
             ${d.series_name ? ` · 系列：${esc(d.series_name)}` : ""}
           </div>
+          ${
+            Array.isArray(langEditions) && langEditions.length > 0
+              ? `<div style="margin-top:4px;">
+                  ${langEditions
+                    .map(
+                      (ed) =>
+                        `<span class="tag-pill ${ed.workno === d.workno ? "user-tag" : ""}" data-action="jump-edition" data-workno="${esc(ed.workno)}" style="cursor:pointer;" title="切换/检索语言版本 ${esc(ed.workno)}">${esc(ed.label || ed.lang)}:${esc(ed.workno)}</span>`
+                    )
+                    .join("")}
+                </div>`
+              : ""
+          }
         </div>
       </div>
 
@@ -603,6 +645,24 @@ function renderDrawer() {
         </div>
         ${d.tree && d.tree.length > 0 ? renderTreeNodes(d.tree, "") : `<div style="color:var(--muted);">暂无本地音轨文件</div>`}
       </div>
+
+      ${
+        Array.isArray(remoteAttachments) && remoteAttachments.length > 0
+          ? `<div class="drawer-section">
+              <div class="drawer-section-title">特典与文本附件 (${remoteAttachments.length})</div>
+              ${remoteAttachments
+                .slice(0, 20)
+                .map(
+                  (att) =>
+                    `<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;">
+                      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(att.rel_path)}">[${esc(att.type)}] ${esc(att.rel_path)}</span>
+                      ${att.download_url ? `<a href="${esc(att.download_url)}" target="_blank" rel="noreferrer" style="color:#93c5fd;flex-shrink:0;margin-left:6px;">查看</a>` : ""}
+                    </div>`
+                )
+                .join("")}
+            </div>`
+          : ""
+      }
 
       ${
         d.paths && d.paths.length > 0
@@ -685,8 +745,10 @@ function renderWorksTab() {
         <option value="workno" ${state.sortBy === "workno" ? "selected" : ""}>按作品号</option>
       </select>
 
+      <button class="${state.subtitleOnly ? "active" : ""}" data-action="toggle-sub-only">带字幕</button>
+
       ${
-        state.circle || state.va || state.tag || state.progress || state.query
+        state.circle || state.va || state.tag || state.progress || state.query || state.subtitleOnly
           ? `<button data-action="reset-filters">重置筛选</button>`
           : ""
       }
@@ -726,7 +788,7 @@ function renderWorksTab() {
                   title="${esc(w.workno)} · ${esc(w.title)} | 评分:${w.rating || "-"} 销量:${w.dl_count || 0}">
                 <td class="mono">${esc(w.workno)}</td>
                 <td>${ageBadgeHTML(w.age_category)}</td>
-                <td class="work-title-cell">${esc(w.title)}</td>
+                <td class="work-title-cell">${w.has_subtitle ? `<span class="badge badge-sfw">字</span>` : ""}${esc(w.title)}</td>
                 <td>${esc(w.circle_name || "-")}</td>
                 <td title="${esc((w.vas || []).join(", "))}">${esc((w.vas || []).join(" / ") || "-")}</td>
                 <td title="${esc((w.tags || []).map((t) => t.name).join(", "))}">
@@ -866,6 +928,24 @@ function renderSettingsTab() {
           <button data-action="scan-all" data-scrape="1">扫描并抓取 DLsite 元数据</button>
           <button data-action="reindex-bleve">重建全文索引</button>
           ${state.task.running ? `<button class="danger" data-action="cancel-task">中断当前任务</button>` : ""}
+        </div>
+
+        <div style="border-top:1px solid var(--border);margin-top:10px;padding-top:10px;">
+          <h3 style="margin-bottom:6px;">asmr.one 全站目录与音轨树断点同步</h3>
+          ${
+            state.asmrCheckpoint
+              ? `<div style="font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.6;">
+                  <div><strong>进度：</strong>第 ${state.asmrCheckpoint.current_page || 0} / ${state.asmrCheckpoint.total_pages || "?"} 页（总库 ${state.asmrCheckpoint.total_count || "?"} 部 · 新增 ${state.asmrCheckpoint.inserted || 0} · 重复跳过 ${state.asmrCheckpoint.duplicates || 0} · 失败 ${state.asmrCheckpoint.failures || 0}）</div>
+                  <div><strong>字段完整度：</strong>社团 ${state.asmrCheckpoint.completeness?.circle_rate_pct ?? 0}% · 声优 ${state.asmrCheckpoint.completeness?.va_rate_pct ?? 0}% · 标签 ${state.asmrCheckpoint.completeness?.tags_rate_pct ?? 0}% · 封面 ${state.asmrCheckpoint.completeness?.cover_rate_pct ?? 0}%</div>
+                  <div><strong>速度 / ETA：</strong>${state.asmrCheckpoint.works_per_sec || 0} 部/s · 下次续跑页码 #${state.asmrCheckpoint.next_page || 1}${state.asmrCheckpoint.eta_seconds ? ` · 预计剩余 ${fmtSec(state.asmrCheckpoint.eta_seconds)}` : ""}</div>
+                </div>`
+              : `<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">支持按页增量写入 SQLite + Bleve 并保存精确页码断点；点开任意作品自动拉取远端音轨目录树与同步字幕。</div>`
+          }
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button class="primary" data-action="sync-asmrone-full">启动 / 断点续跑全站同步</button>
+            <button data-action="sync-asmrone-latest">快速同步最新 200 部</button>
+            ${state.task.running ? `<button class="danger" data-action="cancel-task">暂停并保存断点</button>` : ""}
+          </div>
         </div>
       </div>
 
@@ -1192,12 +1272,18 @@ document.addEventListener("click", async (e) => {
         state.viewMode = target.dataset.mode;
         render();
         break;
+      case "toggle-sub-only":
+        state.subtitleOnly = !state.subtitleOnly;
+        state.page = 1;
+        await loadWorks();
+        break;
       case "reset-filters":
         state.query = "";
         state.circle = "";
         state.va = "";
         state.tag = "";
         state.progress = "";
+        state.subtitleOnly = false;
         state.page = 1;
         await loadWorks();
         break;
@@ -1323,6 +1409,36 @@ document.addEventListener("click", async (e) => {
         await api(`/api/works/${encodeURIComponent(state.detail.workno)}/scrape`, { method: "POST" });
         await openWorkDrawer(state.detail.workno);
         await loadWorks();
+        break;
+      case "sync-work-tracks":
+        if (!state.detail) return;
+        await api(`/api/works/${encodeURIComponent(state.detail.workno)}/sync-tracks`, { method: "POST" });
+        await openWorkDrawer(state.detail.workno);
+        await loadWorks();
+        break;
+      case "jump-edition": {
+        const wno = target.dataset.workno;
+        if (!wno) break;
+        try {
+          await openWorkDrawer(wno);
+        } catch (_) {
+          await api(`/api/works/${encodeURIComponent(wno)}/scrape`, { method: "POST" });
+          await openWorkDrawer(wno);
+          await loadWorks();
+        }
+        break;
+      }
+      case "sync-asmrone-full":
+        await api("/api/asmrone/sync", {
+          method: "POST",
+          body: { page_size: 100, order: "id", sort: "asc", max_pages: 0 },
+        });
+        break;
+      case "sync-asmrone-latest":
+        await api("/api/asmrone/sync", {
+          method: "POST",
+          body: { page_size: 100, order: "create_date", sort: "desc", max_pages: 2, reset_checkpoint: true },
+        });
         break;
       case "resume-recent": {
         const entry = state.recent.find((r) => r.workno === target.dataset.workno);

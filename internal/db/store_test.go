@@ -18,6 +18,7 @@ func TestMigrationsBackupAndTransactionalRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	defer store.Close()
 	ctx := context.Background()
 
 	// Insert user data before running v2/v3 migrations
@@ -33,11 +34,11 @@ func TestMigrationsBackupAndTransactionalRollback(t *testing.T) {
 		t.Fatalf("UpsertUserState: %v", err)
 	}
 
-	// Simulate a failing v2 migration (partial DDL + syntax error) -> must back up & roll back!
+	// Simulate a failing future migration (partial DDL + syntax error) -> must back up & roll back!
 	badMigrations := []Migration{
 		{
-			Version: 2,
-			Name:    "002_broken.sql",
+			Version: 999,
+			Name:    "999_broken.sql",
 			SQL: `
 				CREATE TABLE temp_should_rollback (id INTEGER PRIMARY KEY);
 				THIS IS INVALID SQL THAT MUST FAIL;

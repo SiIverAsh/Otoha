@@ -1,12 +1,16 @@
 package asmrone
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -146,15 +150,263 @@ func (c *Client) getWorkInfo(ctx context.Context, base, wno string) (*workInfoRe
 	return &out, nil
 }
 
+// FetchWorksPage retrieves a paginated catalog page from GET /api/works across mirrors.
+func (c *Client) FetchWorksPage(ctx context.Context, page, pageSize int, order, sortDir string, subtitleOnly bool) ([]*dlsite.Metadata, PaginationInfo, error) {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 || pageSize > 100 {
+		pageSize = 100
+	}
+	if order == "" {
+		order = "id"
+	}
+	if sortDir == "" {
+		sortDir = "asc"
+	}
+
+	q := url.Values{}
+	q.Set("order", order)
+	q.Set("sort", sortDir)
+	q.Set("page", strconv.Itoa(page))
+	q.Set("pageSize", strconv.Itoa(pageSize))
+	if subtitleOnly {
+		q.Set("subtitle", "1")
+	}
+	suffix := "/api/works?" + q.Encode()
+
+	var lastErr error
+	for _, base := range c.opts.BaseURLs {
+		body, err := c.getRawJSON(ctx, strings.TrimRight(base, "/")+suffix)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, PaginationInfo{}, ctx.Err()
+			}
+			lastErr = err
+			continue
+		}
+		var pageResp worksPageResponse
+		if err := json.Unmarshal(body, &pageResp); err != nil {
+			lastErr = fmt.Errorf("asmrone: decode works page %d: %w", page, err)
+			continue
+		}
+		items := make([]*dlsite.Metadata, 0, len(pageResp.Works))
+		for i := range pageResp.Works {
+			item := &pageResp.Works[i]
+			wno := dlsite.NormalizeWorkno(item.SourceID)
+			if wno == "" && item.ID > 0 {
+				wno = dlsite.WorknoFromKikoeruID(item.ID)
+			}
+			if wno == "" {
+				continue
+			}
+			items = append(items, c.toMetadata(item, wno))
+		}
+		return items, pageResp.Pagination, nil
+	}
+	return nil, PaginationInfo{}, fmt.Errorf("asmrone: FetchWorksPage(%d) failed across all mirrors: %w", page, lastErr)
+}
+
+// FetchTracks retrieves and flattens GET /api/tracks/{numericID} across mirrors,
+// pairing sibling .lrc/.vtt/.srt/.ass subtitle files with audio tracks.
+func (c *Client) FetchTracks(ctx context.Context, numericID int) (*TracksBundle, error) {
+	if numericID <= 0 {
+		return nil, fmt.Errorf("asmrone: invalid numeric work id %d", numericID)
+	}
+	suffix := fmt.Sprintf("/api/tracks/%d", numericID)
+
+	var lastErr error
+	for _, base := range c.opts.BaseURLs {
+		body, err := c.getRawJSON(ctx, strings.TrimRight(base, "/")+suffix)
+		switch {
+		case err == nil:
+			var nodes []RemoteNode
+			if uErr := json.Unmarshal(body, &nodes); uErr != nil {
+				lastErr = uErr
+				continue
+			}
+			return flattenRemoteNodes(nodes), nil
+		case errors.Is(err, dlsite.ErrWorkNotFound):
+			return nil, dlsite.ErrWorkNotFound
+		case ctx.Err() != nil:
+			return nil, ctx.Err()
+		default:
+			lastErr = err
+		}
+	}
+	return nil, fmt.Errorf("asmrone: FetchTracks(%d) failed across all mirrors: %w", numericID, lastErr)
+}
+
+func (c *Client) getRawJSON(ctx context.Context, reqURL string) ([]byte, error) {
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			timer := time.NewTimer(600 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
+		}
+		if err := c.waitRateLimit(ctx); err != nil {
+			return nil, err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", c.opts.UserAgent)
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Referer", "https://asmr.one/")
+		req.Header.Set("Origin", "https://asmr.one")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusGone {
+			return nil, dlsite.ErrWorkNotFound
+		}
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("HTTP %d for %s", resp.StatusCode, reqURL)
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("HTTP %d for %s", resp.StatusCode, reqURL)
+		}
+		if readErr != nil {
+			lastErr = readErr
+			continue
+		}
+		return raw, nil
+	}
+	return nil, lastErr
+}
+
+var subExts = []string{".lrc", ".vtt", ".srt", ".ass"}
+
+func isSubtitleTitle(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	for _, se := range subExts {
+		if ext == se {
+			return true
+		}
+	}
+	return false
+}
+
+func flattenRemoteNodes(roots []RemoteNode) *TracksBundle {
+	bundle := &TracksBundle{}
+	ord := 0
+
+	var walk func(nodes []RemoteNode, prefix string)
+	walk = func(nodes []RemoteNode, prefix string) {
+		// Index sibling subtitle files in this folder by stem & audio filename
+		subByKey := make(map[string]string)
+		for _, n := range nodes {
+			if n.Type == "folder" || !isSubtitleTitle(n.Title) {
+				continue
+			}
+			u := strings.TrimSpace(n.MediaDownloadURL)
+			if u == "" {
+				u = strings.TrimSpace(n.MediaStreamURL)
+			}
+			if u == "" {
+				continue
+			}
+			stem := strings.ToLower(strings.TrimSuffix(n.Title, filepath.Ext(n.Title)))
+			if _, exists := subByKey[stem]; !exists {
+				subByKey[stem] = u
+			}
+		}
+
+		for _, n := range nodes {
+			rel := n.Title
+			if prefix != "" {
+				rel = prefix + "/" + n.Title
+			}
+			switch n.Type {
+			case "folder":
+				walk(n.Children, rel)
+			case "audio":
+				ord++
+				streamURL := strings.TrimSpace(n.MediaStreamURL)
+				if streamURL == "" {
+					streamURL = strings.TrimSpace(n.MediaDownloadURL)
+				}
+				stemLower := strings.ToLower(strings.TrimSuffix(n.Title, filepath.Ext(n.Title)))
+				fullLower := strings.ToLower(n.Title)
+				subURL := subByKey[stemLower]
+				if subURL == "" {
+					subURL = subByKey[fullLower]
+				}
+				bundle.AudioTracks = append(bundle.AudioTracks, RemoteAudioTrack{
+					RelPath:      rel,
+					Size:         n.Size,
+					Duration:     n.Duration,
+					Ord:          ord,
+					RemoteHash:   n.Hash,
+					StreamURL:    streamURL,
+					DownloadURL:  strings.TrimSpace(n.MediaDownloadURL),
+					StreamLowURL: strings.TrimSpace(n.StreamLowQualityURL),
+					SubtitleURL:  subURL,
+				})
+			default:
+				bundle.Attachments = append(bundle.Attachments, RemoteAttachment{
+					Type:        n.Type,
+					RelPath:     rel,
+					Size:        n.Size,
+					StreamURL:   strings.TrimSpace(n.MediaStreamURL),
+					DownloadURL: strings.TrimSpace(n.MediaDownloadURL),
+				})
+			}
+		}
+	}
+
+	walk(roots, "")
+	return bundle
+}
+
 // i18nKey converts "zh_cn" (DLsite locale style) to "zh-cn" (asmr.one i18n key).
 func i18nKey(locale string) string {
 	return strings.ReplaceAll(dlsite.FormatLocaleParam(locale), "_", "-")
+}
+
+func compactRawJSON(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" || string(trimmed) == "[]" || string(trimmed) == "{}" {
+		return ""
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, trimmed); err != nil {
+		return string(trimmed)
+	}
+	return buf.String()
+}
+
+func inferWorkTypeFromAttrs(attrs string) string {
+	for _, token := range strings.Split(attrs, ",") {
+		switch strings.TrimSpace(token) {
+		case "SOU", "MNG", "GAM", "MOV", "illust", "novel":
+			return strings.TrimSpace(token)
+		}
+	}
+	return ""
 }
 
 func (c *Client) toMetadata(r *workInfoResponse, wno string) *dlsite.Metadata {
 	release := strings.TrimSpace(r.Release)
 	if len(release) >= 10 {
 		release = release[:10]
+	}
+	createDate := strings.TrimSpace(r.CreateDate)
+	if len(createDate) >= 10 {
+		createDate = createDate[:10]
 	}
 	coverURL := strings.TrimSpace(r.MainCoverURL)
 	if coverURL == "" {
@@ -165,20 +417,40 @@ func (c *Client) toMetadata(r *workInfoResponse, wno string) *dlsite.Metadata {
 	}
 
 	m := &dlsite.Metadata{
-		Workno:         wno,
-		Title:          strings.TrimSpace(r.Title),
-		ReleaseDate:    release,
-		AgeCategory:    mapAgeCategory(r),
-		Price:          r.Price,
-		Rating:         r.RateAverage2dp,
-		RateCount:      r.RateCount,
-		ReviewCount:    r.ReviewCount,
-		DLCount:        r.DLCount,
-		CoverURL:       coverURL,
-		OriginalWorkno: dlsite.NormalizeWorkno(r.OriginalWorkno),
-		Locale:         dlsite.FormatLocaleParam(c.opts.Locale),
-		Source:         "asmrone",
-		FetchedAt:      time.Now().Unix(),
+		Workno:               wno,
+		AsmrOneID:            r.ID,
+		Title:                strings.TrimSpace(r.Title),
+		ReleaseDate:          release,
+		CreateDate:           createDate,
+		AgeCategory:          mapAgeCategory(r),
+		WorkType:             inferWorkTypeFromAttrs(r.WorkAttributes),
+		Price:                r.Price,
+		Rating:               r.RateAverage2dp,
+		RateCount:            r.RateCount,
+		ReviewCount:          r.ReviewCount,
+		DLCount:              r.DLCount,
+		Duration:             r.Duration,
+		HasSubtitle:          r.HasSubtitle,
+		CoverURL:             coverURL,
+		SamCoverURL:          strings.TrimSpace(r.SamCoverURL),
+		ThumbnailCoverURL:    strings.TrimSpace(r.ThumbnailCoverURL),
+		SourceType:           strings.TrimSpace(r.SourceType),
+		SourceURL:            strings.TrimSpace(r.SourceURL),
+		WorkAttributes:       strings.TrimSpace(r.WorkAttributes),
+		LanguageEditionsJSON: compactRawJSON(r.LanguageEditions),
+		OtherEditionsJSON:    compactRawJSON(r.OtherLanguageEditions),
+		TranslationInfoJSON:  compactRawJSON(r.TranslationInfo),
+		RateDetailJSON:       compactRawJSON(r.RateCountDetail),
+		RankJSON:             compactRawJSON(r.Rank),
+		OriginalWorkno:       dlsite.NormalizeWorkno(r.OriginalWorkno),
+		Locale:               dlsite.FormatLocaleParam(c.opts.Locale),
+		Source:               "asmrone",
+		FetchedAt:            time.Now().Unix(),
+	}
+
+	if r.Series != nil {
+		m.SeriesName = strings.TrimSpace(r.Series.Name)
+		m.SeriesID = dlsite.ExtractSeriesID(r.Series.SourceID)
 	}
 
 	if r.Circle != nil {

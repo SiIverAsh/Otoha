@@ -3,14 +3,15 @@ package dlsite
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
-// §3.1: 8-digit branch MUST come before 6-digit branch.
+// §3.1: 8-digit branch MUST come before shorter branch.
 // Go uses RE2 (no negative lookahead), so (?:\D|$) enforces the right digit boundary.
 var (
 	worknoRe = regexp.MustCompile(`[RBV]J(\d{8}|\d{6})(?:\D|$)`)
-	circleRe = regexp.MustCompile(`RG(\d{5})(?:\D|$)`)
+	circleRe = regexp.MustCompile(`RG(\d{8}|\d{5})(?:\D|$)`)
 	seriesRe = regexp.MustCompile(`SRI(\d{10})(?:\D|$)`)
 )
 
@@ -142,4 +143,17 @@ func WorknoFromKikoeruID(id int) string {
 		return fmt.Sprintf("RJ%06d", id)
 	}
 	return fmt.Sprintf("RJ%08d", id)
+}
+
+// NumericIDFromWorkno extracts the integer portion of a canonical workno (e.g. RJ01683351 -> 1683351).
+func NumericIDFromWorkno(workno string) int {
+	wno := NormalizeWorkno(workno)
+	if len(wno) <= 2 {
+		return 0
+	}
+	n, err := strconv.Atoi(wno[2:])
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }

@@ -63,8 +63,12 @@ func NewRouter(deps Dependencies) http.Handler {
 	apiMux.HandleFunc("GET /api/works/{workno}", h.GetWork)
 	apiMux.HandleFunc("PUT /api/works/{workno}/metadata", h.UpdateWorkMetadata)
 	apiMux.HandleFunc("POST /api/works/{workno}/scrape", h.ScrapeSingleWork)
+	apiMux.HandleFunc("POST /api/works/{workno}/sync-tracks", h.SyncWorkTracks)
 	apiMux.HandleFunc("POST /api/works/{workno}/state", h.UpdateWorkState)
 	apiMux.HandleFunc("POST /api/works/{workno}/tags", h.UpdateWorkTags)
+
+	apiMux.HandleFunc("POST /api/asmrone/sync", h.TriggerAsmrOneSync)
+	apiMux.HandleFunc("GET /api/asmrone/status", h.GetAsmrOneSyncStatus)
 
 	apiMux.HandleFunc("GET /api/search", h.SearchWorks)
 	apiMux.HandleFunc("POST /api/search/reindex", h.Reindex)
