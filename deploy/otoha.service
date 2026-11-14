@@ -1,0 +1,23 @@
+[Unit]
+Description=Otoha — Self-Hosted DLsite Voice Works Streaming Server
+Documentation=https://github.com/SiIverAsh/Otoha
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=otoha
+Group=otoha
+WorkingDirectory=/var/lib/otoha
+ExecStart=/usr/local/bin/otoha serve --addr 127.0.0.1:8090 --data /var/lib/otoha/data
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/otoha
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

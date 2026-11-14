@@ -1,0 +1,47 @@
+# Otoha workno extraction test corpus (§3.1)
+# Format: <input_path_or_name> => <expected_workno_or_NONE>
+
+# Basic 6-digit & 8-digit RJ/BJ/VJ
+RJ123456 => RJ123456
+RJ999999 => RJ999999
+RJ01000000 => RJ01000000
+RJ01234567 => RJ01234567
+BJ234567 => BJ234567
+BJ01098765 => BJ01098765
+VJ345678 => VJ345678
+VJ01543210 => VJ01543210
+
+# Case-insensitive normalization
+rj01234567 => RJ01234567
+Rj334212 => RJ334212
+bj01234567 => BJ01234567
+vj654321 => VJ654321
+
+# Real-world DLsite / renamer folder names with circle, date, tags, and extra numbers
+[社团名][RJ334212]作品标题 => RJ334212
+[RaRo] 蓄音レヱル 紅 (RJ298293)[萌 感动 治愈 环绕音] => RJ298293
+GEN[社团][RJ01234567] 癒しの耳かき (CV 花澤) => RJ01234567
+R18_[RG12345]_[RJ01087654]_ささやきボイス_20261110 => RJ01087654
+[240510][RG54321][SRI0000012345][RJ01199887] 作品タイトル Vol.2 => RJ01199887
+20240510_12345678_RJ01234567_987654 => RJ01234567
+RJ395908 作品标题 => RJ395908
+
+# Multi-segment Windows and Unix paths
+D:\VOICES\RJ01234567 => RJ01234567
+D:\VOICES\[社团名][RJ334212]作品标题 => RJ334212
+D:\VOICES\社团名\RJ395908 作品标题\SE有り\01 本編.wav => RJ395908
+/mnt/nas/voices/20260101/[Circle][RJ01456789] Title/Track 01.flac => RJ01456789
+
+# Boundary & anti-truncation cases (must NOT truncate 7/9/10 digits to 6/8 digits!)
+RJ12345 => NONE
+RJ1234567 => NONE
+RJ012345678 => NONE
+RJ0123456789 => NONE
+BJ1234567 => NONE
+VJ123456789 => NONE
+PROJ123456 => NONE
+ARJ01234567 => NONE
+12345678 => NONE
+RG12345 => NONE
+SRI0000012345 => NONE
+D:\VOICES\RJ1234567_bad\RJ01234567_good\01.wav => RJ01234567

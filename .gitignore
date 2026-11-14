@@ -1,0 +1,20 @@
+# Binaries
+otoha
+otoha.exe
+otoha-*
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Runtime data & test artifacts
+data/
+*.db
+*.db-shm
+*.db-wal
+*.db.bak.*
+*.bleve/
+*.log
+
+# Frontend build node_modules (dist/ is committed or built before go build)
+web/node_modules/
