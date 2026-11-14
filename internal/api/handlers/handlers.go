@@ -16,6 +16,7 @@ import (
 	"github.com/SiIverAsh/otoha/internal/db"
 	"github.com/SiIverAsh/otoha/internal/dlsite"
 	"github.com/SiIverAsh/otoha/internal/history"
+	"github.com/SiIverAsh/otoha/internal/scrape"
 	"github.com/SiIverAsh/otoha/internal/search"
 	"github.com/SiIverAsh/otoha/internal/stream"
 	"github.com/SiIverAsh/otoha/internal/subtitle"
@@ -364,21 +365,12 @@ func (a *API) ScrapeSingleWork(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid workno")
 		return
 	}
-	snap := a.Cfg.Snapshot()
 	cache, err := dlsite.NewCache(a.Cfg.CacheDir())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	client, err := dlsite.NewClient(dlsite.ClientOptions{
-		BaseURL:     snap.DLsiteBaseURL,
-		Locale:      snap.ScraperLocale,
-		UserAgent:   snap.ScraperUserAgent,
-		ProxyURL:    snap.ScraperProxy,
-		MinInterval: 100 * time.Millisecond,
-		Cache:       cache,
-		CoversDir:   a.Cfg.CoversDir(),
-	})
+	client, err := scrape.NewClient(a.Cfg, cache, 100*time.Millisecond)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -792,6 +784,13 @@ func (a *API) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			c.ScraperIntervalSec = incoming.ScraperIntervalSec
 		}
 		c.ScraperProxy = strings.TrimSpace(incoming.ScraperProxy)
+		c.AsmrOneEnabled = incoming.AsmrOneEnabled
+		if incoming.AsmrOneIntervalSec > 0 {
+			c.AsmrOneIntervalSec = incoming.AsmrOneIntervalSec
+		}
+		if len(incoming.AsmrOneBaseURLs) > 0 {
+			c.AsmrOneBaseURLs = incoming.AsmrOneBaseURLs
+		}
 		if incoming.ScanMaxDepth > 0 {
 			c.ScanMaxDepth = incoming.ScanMaxDepth
 		}

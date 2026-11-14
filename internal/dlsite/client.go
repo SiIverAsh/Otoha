@@ -23,6 +23,13 @@ var (
 	ErrWorkNotFound = errors.New("dlsite: work not found (404)")
 )
 
+// MetadataFallback is an optional Tier-4 source consulted when DLsite returns 404,
+// is unreachable, or leaves critical fields empty. Implemented by internal/asmrone.Client.
+// Declared here (not in asmrone) to keep the dependency one-directional.
+type MetadataFallback interface {
+	Fetch(ctx context.Context, workno string) (*Metadata, error)
+}
+
 // ClientOptions configures the DLsite metadata client (§3.2, §3.3, §9).
 type ClientOptions struct {
 	BaseURL        string
@@ -35,6 +42,7 @@ type ClientOptions struct {
 	RetryBaseDelay time.Duration
 	Cache          *Cache
 	CoversDir      string
+	Fallback       MetadataFallback
 }
 
 // Client fetches public DLsite metadata serially with rate limiting, proxy auth, and disk caching.
@@ -194,6 +202,10 @@ func (c *Client) getBytes(ctx context.Context, rawURL string, cookie string) ([]
 		}
 		req.Header.Set("User-Agent", c.opts.UserAgent)
 		req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,ja;q=0.8,en;q=0.7")
+		if strings.Contains(strings.ToLower(rawURL), "asmr") {
+			req.Header.Set("Referer", "https://asmr.one/")
+			req.Header.Set("Origin", "https://asmr.one")
+		}
 		if cookie != "" {
 			req.Header.Set("Cookie", cookie)
 		}
@@ -269,12 +281,29 @@ func (c *Client) Fetch(ctx context.Context, workno string, force bool) (*Metadat
 		}
 	}
 	if errors.Is(err, ErrWorkNotFound) {
+		// Tier-4: DLsite has no record (delisted / exclusive) — try asmr.one before
+		// writing the permanent not-found marker, which would block all future rescans.
+		if fb := c.tryFallback(ctx, wno); fb != nil {
+			fb.FetchedAt = time.Now().Unix()
+			if c.opts.Cache != nil {
+				_ = c.opts.Cache.Put(fb)
+			}
+			return fb, nil
+		}
 		if c.opts.Cache != nil {
 			_ = c.opts.Cache.PutNotFound(wno)
 		}
 		return nil, ErrWorkNotFound
 	}
 	if err != nil {
+		// If DLsite itself is unreachable / 5xx, also consult Tier-4 fallback without marking 404.
+		if fb := c.tryFallback(ctx, wno); fb != nil {
+			fb.FetchedAt = time.Now().Unix()
+			if c.opts.Cache != nil {
+				_ = c.opts.Cache.Put(fb)
+			}
+			return fb, nil
+		}
 		return nil, err
 	}
 
@@ -316,11 +345,33 @@ func (c *Client) Fetch(ctx context.Context, workno string, force bool) (*Metadat
 		}
 	}
 
+	// Tier-4: asmr.one fills gaps DLsite left (common for delisted or translated works).
+	if meta.Title == "" || len(meta.VAs) == 0 || len(meta.Tags) == 0 {
+		if fb := c.tryFallback(ctx, wno); fb != nil {
+			if meta.Title == "" {
+				meta.Title = fb.Title
+			}
+			MergeFallbackMetadata(meta, fb)
+			meta.Source = strings.TrimPrefix(meta.Source+"+asmrone", "+")
+		}
+	}
+
 	meta.FetchedAt = time.Now().Unix()
 	if c.opts.Cache != nil {
 		_ = c.opts.Cache.Put(meta)
 	}
 	return meta, nil
+}
+
+func (c *Client) tryFallback(ctx context.Context, wno string) *Metadata {
+	if c.opts.Fallback == nil || ctx.Err() != nil {
+		return nil
+	}
+	fb, err := c.opts.Fallback.Fetch(ctx, wno)
+	if err != nil || fb == nil || fb.Title == "" {
+		return nil
+	}
+	return fb
 }
 
 func (c *Client) fetchHTML(ctx context.Context, workno, locale string) (*Metadata, error) {

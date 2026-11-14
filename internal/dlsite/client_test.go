@@ -241,3 +241,90 @@ func TestHTTPProxyWithBasicAuth(t *testing.T) {
 		t.Fatalf("authenticated HTTP proxy failed: meta=%+v err=%v sawAuth=%v", meta, err, sawProxyAuth.Load())
 	}
 }
+
+type stubFallback struct {
+	data map[string]*Metadata
+}
+
+func (s *stubFallback) Fetch(_ context.Context, workno string) (*Metadata, error) {
+	if m, ok := s.data[workno]; ok {
+		cp := *m
+		return &cp, nil
+	}
+	return nil, ErrWorkNotFound
+}
+
+func TestTier4MetadataFallback404AndPartialMerge(t *testing.T) {
+	dlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wno := r.URL.Query().Get("workno")
+		if r.URL.Path == "/maniax/api/=/product.json" && wno == "RJ01555666" {
+			// Partial DLsite payload missing VAs & Tags -> Tier-4 should fill them!
+			_, _ = io.WriteString(w, `[{"workno":"RJ01555666","work_name":"DLsite残缺作品","age_category":1,"price":660,"dl_count":50,"rate_average_2dp":4.6,"genres":[],"creaters":[]}]`)
+			return
+		}
+		// Everything else (including RJ243448) is delisted 404 on DLsite
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer dlSrv.Close()
+
+	cache, err := NewCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewCache: %v", err)
+	}
+
+	fb := &stubFallback{
+		data: map[string]*Metadata{
+			"RJ243448": {
+				Workno:      "RJ243448",
+				Title:       "下架兜底作品",
+				CircleID:    "RG12345",
+				CircleName:  "Fallback社",
+				AgeCategory: AgeGeneral,
+				VAs:         []string{"悠木テスト"},
+				Tags:        []string{"治愈"},
+				Source:      "asmrone",
+			},
+			"RJ01555666": {
+				Workno: "RJ01555666",
+				Title:  "Fallback标题",
+				VAs:    []string{"补全声优"},
+				Tags:   []string{"补全标签"},
+				Source: "asmrone",
+			},
+		},
+	}
+
+	client, err := NewClient(ClientOptions{
+		BaseURL:        dlSrv.URL,
+		Locale:         "zh_cn",
+		MinInterval:    time.Millisecond,
+		RetryBaseDelay: time.Millisecond,
+		Cache:          cache,
+		Fallback:       fb,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	// 1. DLsite 404 -> Tier-4 fallback MUST run BEFORE PutNotFound, returning fallback data and caching NotFound=false!
+	m1, err := client.Fetch(context.Background(), "RJ243448", false)
+	if err != nil {
+		t.Fatalf("Fetch delisted RJ243448: %v", err)
+	}
+	if m1.Title != "下架兜底作品" || m1.Source != "asmrone" {
+		t.Fatalf("unexpected fallback metadata: %+v", m1)
+	}
+	cached, ok := cache.Get("RJ243448")
+	if !ok || cached.NotFound || cached.Title != "下架兜底作品" {
+		t.Fatalf("cache must store valid fallback metadata (NotFound=false), got ok=%v cached=%+v", ok, cached)
+	}
+
+	// 2. Partial DLsite work merges VAs & Tags from Tier-4 fallback
+	m2, err := client.Fetch(context.Background(), "RJ01555666", false)
+	if err != nil {
+		t.Fatalf("Fetch partial RJ01555666: %v", err)
+	}
+	if m2.Title != "DLsite残缺作品" || len(m2.VAs) != 1 || m2.VAs[0] != "补全声优" || !strings.Contains(m2.Source, "+asmrone") {
+		t.Fatalf("expected merged Tier-4 VAs/Tags & +asmrone source, got %+v", m2)
+	}
+}

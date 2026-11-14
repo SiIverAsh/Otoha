@@ -11,7 +11,7 @@ import (
 
 // Config holds all server, scanner, scraper, and privacy settings.
 type Config struct {
-	mu sync.RWMutex `json:"-"`
+	mu *sync.RWMutex `json:"-"`
 
 	ListenAddr           string   `json:"listen_addr"`
 	DataDir              string   `json:"data_dir"`
@@ -22,6 +22,9 @@ type Config struct {
 	ScraperProxy         string   `json:"scraper_proxy"`
 	ScraperUserAgent     string   `json:"scraper_user_agent"`
 	DLsiteBaseURL        string   `json:"dlsite_base_url,omitempty"`
+	AsmrOneEnabled       bool     `json:"asmrone_enabled"`
+	AsmrOneBaseURLs      []string `json:"asmrone_base_urls,omitempty"`
+	AsmrOneIntervalSec   float64  `json:"asmrone_interval_sec"`
 	ScanMaxDepth         int      `json:"scan_max_depth"`
 	ScanIgnorePatterns   []string `json:"scan_ignore_patterns"`
 	HistoryEnabled       bool     `json:"history_enabled"`
@@ -38,6 +41,7 @@ func Default(dataDir string) *Config {
 		dataDir = "data"
 	}
 	return &Config{
+		mu:                 &sync.RWMutex{},
 		ListenAddr:         "127.0.0.1:8090",
 		DataDir:            dataDir,
 		AuthEnabled:        false,
@@ -47,6 +51,9 @@ func Default(dataDir string) *Config {
 		ScraperProxy:       "",
 		ScraperUserAgent:   "Mozilla/5.0 (compatible; Otoha/1.0; +https://github.com/SiIverAsh/Otoha)",
 		DLsiteBaseURL:      "https://www.dlsite.com",
+		AsmrOneEnabled:     true,
+		AsmrOneBaseURLs:    nil, // nil => asmrone.DefaultBaseURLs
+		AsmrOneIntervalSec: 0.5,
 		ScanMaxDepth:       6,
 		ScanIgnorePatterns: []string{
 			"_*",
@@ -102,6 +109,9 @@ func Load(dataDir string) (*Config, error) {
 	if cfg.DLsiteBaseURL == "" {
 		cfg.DLsiteBaseURL = "https://www.dlsite.com"
 	}
+	if cfg.AsmrOneIntervalSec <= 0 {
+		cfg.AsmrOneIntervalSec = 0.5
+	}
 	if cfg.HeartbeatIntervalSec <= 0 {
 		cfg.HeartbeatIntervalSec = 30
 	}
@@ -132,12 +142,25 @@ func (c *Config) applyEnv() {
 			c.DefaultHideNSFW = b
 		}
 	}
+	if v := os.Getenv("OTOHA_ASMRONE"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.AsmrOneEnabled = b
+		}
+	}
+}
+
+func (c *Config) ensureMu() *sync.RWMutex {
+	if c.mu == nil {
+		c.mu = &sync.RWMutex{}
+	}
+	return c.mu
 }
 
 // Save atomically persists configuration to <dataDir>/config.json.
 func (c *Config) Save() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	mu := c.ensureMu()
+	mu.Lock()
+	defer mu.Unlock()
 	if err := os.MkdirAll(c.DataDir, 0o755); err != nil {
 		return err
 	}
@@ -154,17 +177,21 @@ func (c *Config) Save() error {
 
 // Snapshot returns a value copy safe for concurrent readers.
 func (c *Config) Snapshot() Config {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	mu := c.ensureMu()
+	mu.RLock()
+	defer mu.RUnlock()
 	cp := *c
+	cp.mu = nil
 	cp.ScanIgnorePatterns = append([]string(nil), c.ScanIgnorePatterns...)
+	cp.AsmrOneBaseURLs = append([]string(nil), c.AsmrOneBaseURLs...)
 	return cp
 }
 
 // Update applies mutator under write lock and persists to disk.
 func (c *Config) Update(fn func(*Config)) error {
-	c.mu.Lock()
+	mu := c.ensureMu()
+	mu.Lock()
 	fn(c)
-	c.mu.Unlock()
+	mu.Unlock()
 	return c.Save()
 }

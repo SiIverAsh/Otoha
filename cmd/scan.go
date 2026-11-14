@@ -10,12 +10,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/SiIverAsh/otoha/internal/config"
 	"github.com/SiIverAsh/otoha/internal/db"
 	"github.com/SiIverAsh/otoha/internal/dlsite"
 	"github.com/SiIverAsh/otoha/internal/scanner"
+	"github.com/SiIverAsh/otoha/internal/scrape"
 	"github.com/SiIverAsh/otoha/internal/search"
 )
 
@@ -24,7 +24,7 @@ func runScan(args []string) error {
 	dataDir := fs.String("data", "data", "Data directory")
 	rootDir := fs.String("root", "", "Optional local directory to add/scan immediately")
 	storageName := fs.String("name", "", "Optional storage alias when --root is given")
-	scrape := fs.Bool("scrape", false, "Also fetch missing DLsite metadata (serially with rate limit & disk cache)")
+	doScrape := fs.Bool("scrape", false, "Also fetch missing DLsite metadata (serially with rate limit & disk cache)")
 	force := fs.Bool("force", false, "Force re-scrape even if cached")
 	proxyURL := fs.String("proxy", "", "HTTP/SOCKS5 proxy URL (supports http://user:pass@host:port or socks5://user:pass@host:port)")
 	locale := fs.String("locale", "", "DLsite metadata locale (zh_cn|ja_jp|zh_tw|en_us|ko_kr)")
@@ -121,7 +121,7 @@ func runScan(args []string) error {
 
 	logger.Printf("[scan] completed: %d work folders, %d tracks, %d skipped entries.", totalWorks, totalTracks, totalSkipped)
 
-	if *scrape {
+	if *doScrape {
 		worknos, err := store.ListUnscrapedWorknos(ctx, *force)
 		if err != nil {
 			return err
@@ -134,15 +134,7 @@ func runScan(args []string) error {
 		if err != nil {
 			return err
 		}
-		client, err := dlsite.NewClient(dlsite.ClientOptions{
-			BaseURL:     cfg.DLsiteBaseURL,
-			Locale:      cfg.ScraperLocale,
-			UserAgent:   cfg.ScraperUserAgent,
-			ProxyURL:    cfg.ScraperProxy,
-			MinInterval: time.Duration(cfg.ScraperIntervalSec * float64(time.Second)),
-			Cache:       cache,
-			CoversDir:   cfg.CoversDir(),
-		})
+		client, err := scrape.NewClient(cfg, cache, 0)
 		if err != nil {
 			return err
 		}

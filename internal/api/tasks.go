@@ -14,6 +14,7 @@ import (
 	"github.com/SiIverAsh/otoha/internal/db"
 	"github.com/SiIverAsh/otoha/internal/dlsite"
 	"github.com/SiIverAsh/otoha/internal/scanner"
+	"github.com/SiIverAsh/otoha/internal/scrape"
 	"github.com/SiIverAsh/otoha/internal/search"
 )
 
@@ -205,15 +206,7 @@ func (tm *TaskManager) runScanPipeline(ctx context.Context, onlyStorageID int64,
 		if err == nil && len(unscraped) > 0 {
 			cache, cErr := dlsite.NewCache(tm.cfg.CacheDir())
 			if cErr == nil {
-				client, clErr := dlsite.NewClient(dlsite.ClientOptions{
-					BaseURL:     cfgSnap.DLsiteBaseURL,
-					Locale:      cfgSnap.ScraperLocale,
-					UserAgent:   cfgSnap.ScraperUserAgent,
-					ProxyURL:    cfgSnap.ScraperProxy,
-					MinInterval: time.Duration(cfgSnap.ScraperIntervalSec * float64(time.Second)),
-					Cache:       cache,
-					CoversDir:   tm.cfg.CoversDir(),
-				})
+				client, clErr := scrape.NewClient(tm.cfg, cache, 0)
 				if clErr == nil {
 					tm.publish(func(s *TaskSnapshot) {
 						s.Phase = "scraping"

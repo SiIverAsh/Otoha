@@ -9,8 +9,9 @@ Open-source, zero-CGO, single-binary self-hosted streaming server for user-owned
 
 - **真正单文件静态编译（无 CGO / 无外部依赖）**：基于 Go 标准库 + `modernc.org/sqlite` + `blevesearch/bleve/v2`，**无需安装 Node.js、无需 FFmpeg**，单二进制内嵌 Web 前端与 SQL 迁移脚本，支持一键交叉编译至 `linux/arm64`（树莓派 / 低配 NAS 常驻内存 `< 150MB`）。
 - **原生支持 6 位与 8 位作品号**：精准识别 `RJ` / `BJ` / `VJ` 的 6 位与 8 位作品号（如 `RJ123456`、`RJ01234567`）以及 `RG\d{5}` 社团号、`SRI\d{10}` 系列号，彻底解决旧版 kikoeru 8 位号导入失败与静默截断问题。
-- **完全离线可用 + 三级容错元数据抓取**：
+- **完全离线可用 + 四级容错元数据抓取**：
   - 元数据优先走 `product.json`，动态销量/评分用 `info/ajax` 补齐，异常回落至作品页 HTML 解析；对翻译作品自动回溯原作品号与 `ja_jp` 补齐声优列表。
+  - 以上三级全部失败或字段残缺时，自动回落至 asmr.one 公开接口（四镜像按序降级）补齐标题、社团、声优与标签；该源可通过 `asmrone_enabled` 关闭，关闭后恢复纯 DLsite 行为。
   - 所有抓取结果落盘缓存，重扫媒体库零重复请求；区分永久 `404` 与网络限流退避重试，支持随时中断与断点续传；同时提供手工编辑元数据与 JSON 备份导入/导出。
   - 支持带用户名密码认证的 `HTTP` / `HTTPS` / `SOCKS5` 代理。
 - **保留原始多版本目录树 + 原生无损直出流媒体**：
@@ -26,7 +27,8 @@ Open-source, zero-CGO, single-binary self-hosted streaming server for user-owned
 ## 合规与安全声明（必读）
 
 1. **仅管理自有文件**：Otoha 仅用于索引与流式播放**用户本人合法持有**的本地音频文件。本项目**不提供、不索引、不分发任何作品内容**，亦**不实现** DLsite 账号登录或已购作品批量下载器功能。
-2. **公网暴露安全警告**：Otoha 本身不内置内网穿透。若通过公网 IP、反向代理（Caddy / Nginx）、Cloudflare Tunnel 或 frp 对外暴露服务，**请务必开启多用户登录认证（`auth_enabled: true`）并强制全程启用 HTTPS**（或优先使用 Tailscale / WireGuard 组网访问），严防私人媒体库在公网裸奔被搜索引擎或扫描器抓取。
+2. **第三方元数据兜底说明**：asmr.one 为第三方聚合站，Otoha 仅在 DLsite 失败或字段残缺时读取其公开**元数据**接口，不请求、不索引、不分发其音频资源。
+3. **公网暴露安全警告**：Otoha 本身不内置内网穿透。若通过公网 IP、反向代理（Caddy / Nginx）、Cloudflare Tunnel 或 frp 对外暴露服务，**请务必开启多用户登录认证（`auth_enabled: true`）并强制全程启用 HTTPS**（或优先使用 Tailscale / WireGuard 组网访问），严防私人媒体库在公网裸奔被搜索引擎或扫描器抓取。
 
 ---
 

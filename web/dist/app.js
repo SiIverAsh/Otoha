@@ -907,6 +907,10 @@ function renderSettingsTab() {
           <input type="number" step="0.5" id="cfg-interval" value="${s.scraper_interval_sec ?? 3}" style="width:90px;" />
         </div>
         <div class="form-row">
+          <label>启用 asmr.one 四级元数据兜底</label>
+          <input type="checkbox" id="cfg-asmrone" ${s.asmrone_enabled !== false ? "checked" : ""} />
+        </div>
+        <div class="form-row">
           <label>最大扫描深度</label>
           <input type="number" id="cfg-depth" value="${s.scan_max_depth ?? 6}" style="width:90px;" />
         </div>
@@ -1385,6 +1389,7 @@ document.addEventListener("click", async (e) => {
           scraper_locale: document.getElementById("cfg-locale").value,
           scraper_proxy: document.getElementById("cfg-proxy").value.trim(),
           scraper_interval_sec: Number(document.getElementById("cfg-interval").value),
+          asmrone_enabled: document.getElementById("cfg-asmrone").checked,
           scan_max_depth: Number(document.getElementById("cfg-depth").value),
           webdav_enabled: document.getElementById("cfg-webdav").checked,
           auth_enabled: document.getElementById("cfg-auth").checked,
