@@ -51,6 +51,8 @@ $env:CGO_ENABLED = "0"; $env:GOOS = "linux"; $env:GOARCH = "arm64"; go build -o 
 
 ### 2. 扫描本地音声目录并启动服务
 
+ASMR.one 全站同步的参数、曲目链接模式和断点限制见 [同步说明](docs/asmrone-sync.md)。
+
 ```powershell
 # 离线扫描本地目录（不请求外网）
 .\otoha.exe scan --data .\data --root "D:\VOICES" --name Voices
@@ -91,6 +93,25 @@ $env:CGO_ENABLED = "0"; $env:GOOS = "linux"; $env:GOARCH = "arm64"; go build -o 
 
 - **Windows 服务**：`.\otoha.exe service install --addr 127.0.0.1:8090 --data "C:\Otoha\data"`
 - **Linux systemd**：参考 [`deploy/otoha.service`](deploy/otoha.service) 或执行 `./otoha service systemd` 生成单元配置。
+
+### 6. Release 构建与发布
+
+`.github/workflows/release.yml` 在 main 推送、main 的 Pull Request 和手动运行时执行三平台测试。
+main 推送或手动运行后，还会生成 Linux、Windows、macOS 各 amd64/arm64 共六个平台的程序包，
+可在 Actions 的 `release-assets` artifact 下载（保留 14 天）；Pull Request 只运行检查。
+每个包包含程序、README、LICENSE 和部署示例，另附 SHA-256 校验和。
+
+推送版本标签会在测试及构建成功后自动发布 GitHub Release：
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+标签格式为 `v主版本.次版本.修订号`，可带 `-rc.1` 等预发布后缀；带后缀的版本自动标为 Pre-release。
+二进制的 `--version` 会写入对应版本号；非标签构建显示 `dev-提交短哈希`。
+重跑同一标签会覆盖该 Release 的同名附件。发布使用内置 `GITHUB_TOKEN`，无需额外配置 PAT。
+当前没有 Android APK，手机可通过浏览器访问已部署的 Web 服务。
 
 ---
 

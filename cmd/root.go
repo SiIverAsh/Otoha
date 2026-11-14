@@ -11,7 +11,8 @@ import (
 	"github.com/SiIverAsh/otoha/internal/db"
 )
 
-const Version = "0.1.0"
+// Version is overridden with the release tag via go build -ldflags -X.
+var Version = "0.1.0"
 
 func Execute(args []string) error {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
