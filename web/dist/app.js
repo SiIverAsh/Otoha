@@ -701,7 +701,7 @@ function renderWorksTab() {
     ${
       state.viewMode === "table"
         ? `
-      <table class="compact-table">
+      <table class="compact-table works-table">
         <thead>
           <tr>
             <th style="width:98px;">作品号</th>
