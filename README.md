@@ -116,9 +116,17 @@ node --test web/test/*.test.mjs
 
 浏览器模块测试使用 Node.js 24。
 发布工作流在 Linux、Windows 和 macOS 上运行检查。
-`main` 构建成功后更新 `nightly` 预发布版，推送有效的 `vX.Y.Z` 标签后发布对应版本。
-带 `-rc.1` 等后缀的标签会发布为预发布版。
-[发布工作流](https://github.com/SiIverAsh/Otoha/blob/main/.github/workflows/release.yml)
+在 **Actions → Release → Run workflow** 中选择 `main` 和版本增量，通过检查和打包后会自动发布正式 Release。
+工作流从最高的 `vX.Y.Z` 稳定版本递增，首次发布从 `0.0.0` 起算。
+GitHub 会在发布时自动为本次构建的提交创建对应标签。
+
+| 选项 | 从 `1.2.3` 递增后的版本 |
+| --- | --- |
+| `major`（大版本） | `2.0.0` |
+| `minor`（小版本） | `1.3.0` |
+| `patch`（补丁，默认） | `1.2.4` |
+
+[发布工作流](https://github.com/SiIverAsh/Otoha/actions/workflows/release.yml)
 
 ## 许可证
 
