@@ -4,6 +4,7 @@ import test from "node:test";
 import { Script } from "node:vm";
 
 const source = readFileSync(new URL("../src/app.js", import.meta.url), "utf8")
+  .replaceAll("\r\n", "\n")
   .replace(/^import \{[^}]*\} from "\.\/(?:library|dropdowns)\.js";\n/gm, "")
   .replace(/\nstartApp\(\);\s*$/, "");
 const navigationScript = new Script(`${source}

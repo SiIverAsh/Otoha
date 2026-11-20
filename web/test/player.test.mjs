@@ -6,6 +6,7 @@ import { Script } from "node:vm";
 
 // Exercise the player with browser, drawer and network test doubles.
 const source = readFileSync(new URL("../src/app.js", import.meta.url), "utf8")
+  .replaceAll("\r\n", "\n")
   .replace(/^import \{[\s\S]*?\} from "\.\/library\.js";\n/, "")
   .replace(/^import \{ closeDropdown, enhanceDropdowns \} from "\.\/dropdowns\.js";\n/m, "")
   .replace(/\nstartApp\(\);\s*$/, "");
