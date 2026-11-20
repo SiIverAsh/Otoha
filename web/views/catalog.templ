@@ -156,7 +156,13 @@ templ catalogFilters(data CatalogData) {
 }
 
 templ facetSelect(kind, label, selected string, entries []db.FacetCount) {
-	<select id={ "filter-" + kind } name={ kind } aria-label={ label } title={ displayOr(selected, "全部" + label) }>
+	<select
+		id={ "filter-" + kind }
+		name={ kind }
+		aria-label={ label }
+		title={ displayOr(selected, "全部" + label) }
+		data-dropdown-search?={ kind == "circle" || kind == "va" }
+	>
 		<option value="" data-count={ strconv.Itoa(len(entries)) } selected?={ selected == "" }>全部{ label }</option>
 		if selected != "" && !slices.ContainsFunc(entries, func(entry db.FacetCount) bool { return entry.Name == selected }) {
 			<option value={ selected } selected>{ selected }</option>

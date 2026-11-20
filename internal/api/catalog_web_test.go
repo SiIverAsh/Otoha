@@ -91,6 +91,11 @@ func TestCatalogHTMLNavigation(t *testing.T) {
 		if !strings.HasPrefix(body, "<!doctype html>") && !strings.HasPrefix(body, "<!DOCTYPE html>") {
 			t.Fatal("expected full HTML document")
 		}
+		input := document.Find("#search-input[role=combobox]")
+		if input.AttrOr("aria-controls", "") != "search-suggestions" ||
+			document.Find("#search-form #search-suggestions[role=listbox][hidden]").Length() != 1 {
+			t.Fatal("topbar search is missing its suggestions listbox")
+		}
 		if got := document.Find(".work-card-title").Text(); got != title {
 			t.Fatalf("full response first work title = %q, want %q", got, title)
 		}
@@ -173,6 +178,9 @@ func TestCatalogHTMLNavigation(t *testing.T) {
 		}
 		for key, label := range map[string]string{"circle": "全部社团", "va": "全部声优", "tag": "全部标签"} {
 			selectInput := filters.Find("select[name=" + key + "]")
+			if _, hasSearch := selectInput.Attr("data-dropdown-search"); hasSearch != (key == "circle" || key == "va") {
+				t.Fatalf("unexpected dropdown search availability for %s", key)
+			}
 			defaultOption := selectInput.Find("option[value='']")
 			if defaultOption.Text() != label || defaultOption.AttrOr("data-count", "") != "1" {
 				t.Fatalf("default option for %s lost its label or count", key)

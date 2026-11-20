@@ -93,6 +93,9 @@ const DRAWER_EXIT = { duration: 340, easing: "cubic-bezier(0.42, 0, 0.28, 1)" };
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const notificationDuration = 4000;
 const notificationExitDuration = 180;
+const searchSuggestionDelay = 220;
+const searchSuggestionLimit = 6;
+let searchSuggestions = null;
 
 async function api(path, opts = {}) {
   const headers = Object.assign({}, opts.headers || {});
@@ -637,6 +640,123 @@ function updateTaskNotification(snapshot, previous, isInitial) {
 
 function reportRequestError(error) {
   notify(error?.message || "请求未完成", { tone: "error" });
+}
+
+function bindSearchSuggestions(form) {
+  const input = form.querySelector("#search-input");
+  const list = form.querySelector("#search-suggestions");
+  let timer;
+  let request;
+  let isComposing = false;
+  let activeIndex = -1;
+
+  function close() {
+    clearTimeout(timer);
+    timer = undefined;
+    request?.abort();
+    request = undefined;
+    activeIndex = -1;
+    list.replaceChildren();
+    list.hidden = true;
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+  }
+
+  function createOption({ title, workno }, index) {
+    const option = document.createElement("button");
+    option.type = "button";
+    option.tabIndex = -1;
+    option.className = "search-suggestion";
+    option.id = `search-suggestion-${index}`;
+    option.setAttribute("role", "option");
+    option.setAttribute("aria-selected", "false");
+    const titleText = document.createElement("span");
+    titleText.className = "search-suggestion-title";
+    titleText.textContent = title;
+    const worknoText = document.createElement("span");
+    worknoText.className = "search-suggestion-workno";
+    worknoText.textContent = workno;
+    option.append(titleText, worknoText);
+    // Keep focus on the input until click, including in browsers that do not focus buttons.
+    option.addEventListener("mousedown", (event) => event.preventDefault());
+    option.addEventListener("click", () => {
+      input.focus({ preventScroll: true });
+      close();
+      openWorkDrawer(workno).catch(reportRequestError);
+    });
+    return option;
+  }
+
+  async function load(keyword) {
+    timer = undefined;
+    const controller = new AbortController();
+    request = controller;
+    const params = new URLSearchParams(new FormData(form));
+    params.set("q", keyword);
+    params.set("page", "1");
+    params.set("page_size", String(searchSuggestionLimit));
+    try {
+      const { items } = await api(`/api/search?${params}`, { signal: controller.signal });
+      if (request !== controller || !items?.length) return;
+      list.replaceChildren(...items.map(createOption));
+      list.hidden = false;
+      input.setAttribute("aria-expanded", "true");
+    } catch (error) {
+      if (request === controller) reportRequestError(error);
+    } finally {
+      if (request === controller) request = undefined;
+    }
+  }
+
+  function schedule() {
+    close();
+    const keyword = input.value.trim();
+    if (keyword) timer = setTimeout(() => load(keyword), searchSuggestionDelay);
+  }
+
+  input.addEventListener("input", (event) => {
+    if (!isComposing && !event.isComposing) schedule();
+  });
+  input.addEventListener("compositionstart", () => {
+    isComposing = true;
+    close();
+  });
+  input.addEventListener("compositionend", () => {
+    isComposing = false;
+    schedule();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (isComposing || event.isComposing) return;
+    if (event.key === "Escape" && (timer !== undefined || request || !list.hidden)) {
+      event.preventDefault();
+      close();
+      return;
+    }
+    if (list.hidden) return;
+    if (event.key === "Enter" && activeIndex >= 0) {
+      event.preventDefault();
+      list.children[activeIndex].click();
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    list.children[activeIndex]?.setAttribute("aria-selected", "false");
+    const count = list.children.length;
+    if (event.key === "ArrowDown") {
+      activeIndex = (activeIndex + 1) % count;
+    } else {
+      activeIndex = activeIndex <= 0 ? count - 1 : activeIndex - 1;
+    }
+    const option = list.children[activeIndex];
+    option.setAttribute("aria-selected", "true");
+    input.setAttribute("aria-activedescendant", option.id);
+    option.scrollIntoView({ block: "nearest" });
+  });
+  form.addEventListener("focusout", (event) => {
+    if (!form.contains(event.relatedTarget)) close();
+  });
+  form.addEventListener("submit", close);
+  return { form, close };
 }
 
 function currentPageURL() {
@@ -1370,6 +1490,11 @@ function syncTaskIndicator() {
 function syncPage() {
   const page = document.querySelector("[data-page-tab]");
   if (page) syncNavigation(page);
+  const searchForm = document.getElementById("search-form");
+  if (searchForm !== searchSuggestions?.form) {
+    searchSuggestions?.close();
+    searchSuggestions = searchForm ? bindSearchSuggestions(searchForm) : null;
+  }
   for (const time of document.querySelectorAll("[data-history-time]")) {
     time.textContent = fmtTimeAgo(Number(time.dataset.historyTime));
   }
@@ -1605,6 +1730,7 @@ document.addEventListener("htmx:beforeSwap", ({ detail }) => {
     return;
   }
   if (detail.target.id !== "page-content" || !detail.shouldSwap) return;
+  searchSuggestions?.close();
   const { elt, headers, verb } = detail.requestConfig;
   const navigate = headers["X-Otoha-Navigate"] === "1" ||
     (elt !== detail.target && verb === "get");
@@ -1751,6 +1877,7 @@ function isWorkDrawerBackground(target) {
 }
 
 document.addEventListener("click", async (e) => {
+  if (!e.target.closest("#search-form")) searchSuggestions?.close();
   if (e.target.closest("a.dlsite-link")) return;
   const summary = e.target.closest(".settings-page details > summary");
   if (summary) {

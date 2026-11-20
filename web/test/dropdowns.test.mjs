@@ -7,6 +7,7 @@ class TestElement extends EventTarget {
   parentElement = null;
   className = "";
   id = "";
+  hidden = false;
   dataset = {};
   attributes = new Map();
   style = {};
@@ -120,6 +121,114 @@ function send(element, type, fields = {}) {
   element.dispatchEvent(event);
   return event;
 }
+
+function typeSearch(input, text, fields) {
+  input.value = text;
+  send(input, "input", fields);
+}
+
+function visibleOptionLabels(listbox) {
+  return listbox.querySelectorAll(".dropdown-option")
+    .filter((option) => !option.hidden)
+    .map((option) => option.querySelector(".dropdown-option-text").textContent);
+}
+
+test("circle search filters by name fragments and selects through the native control", (context) => {
+  context.after(() => closeDropdown(false, { immediate: true }));
+  const { document, addSelect } = fixture();
+  const circle = addSelect("filter-circle", "社团", [
+    { label: "全部社团", value: "" },
+    { label: "海岸声音工房", value: "coast", count: 12 },
+    { label: "森林声音工房", value: "forest" },
+    { label: "海岸声音社", value: "unavailable", disabled: true },
+  ]);
+  circle.dataset.dropdownSearch = "";
+  const changes = [];
+  circle.addEventListener("change", (event) => changes.push({ value: circle.value, bubbles: event.bubbles }));
+  enhanceDropdowns(document.body, "");
+
+  const trigger = document.body.querySelector("#filter-circle-trigger");
+  send(trigger, "click");
+  const menu = document.body.querySelector(".dropdown-menu-searchable");
+  assert.ok(menu, "expected the circle menu to offer search");
+  const input = menu.querySelector(".dropdown-search");
+  const listbox = menu.querySelector(".dropdown-results");
+  assert.equal(menu.getAttribute("role"), "dialog");
+  assert.equal(input.getAttribute("role"), "combobox");
+  assert.equal(input.getAttribute("aria-controls"), listbox.id);
+  assert.equal(listbox.getAttribute("role"), "listbox");
+  assert.equal(document.activeElement, input);
+
+  typeSearch(input, "银河");
+  assert.deepEqual(visibleOptionLabels(listbox), []);
+  assert.equal(menu.querySelector(".dropdown-no-results").hidden, false);
+  assert.equal(input.getAttribute("aria-activedescendant"), null);
+
+  typeSearch(input, "");
+  assert.equal(visibleOptionLabels(listbox)[0], "全部社团");
+  assert.equal(menu.querySelector(".dropdown-no-results").hidden, true);
+
+  typeSearch(input, "声音　岸");
+  assert.deepEqual(visibleOptionLabels(listbox), ["海岸声音工房", "海岸声音社"]);
+  assert.deepEqual(changes, []);
+  send(input, "keydown", { key: "ArrowDown" });
+  const enabledMatch = listbox.querySelectorAll(".dropdown-option")
+    .find((option) => !option.hidden && option.getAttribute("aria-disabled") !== "true");
+  assert.equal(input.getAttribute("aria-activedescendant"), enabledMatch.id);
+  assert.equal(send(input, "keydown", { key: "Enter" }).defaultPrevented, true);
+  assert.deepEqual(changes, [{ value: "coast", bubbles: true }]);
+  assert.equal(trigger.querySelector(".dropdown-caption").textContent, "海岸声音工房 (12)");
+  assert.equal(menu.isConnected, false);
+  assert.equal(document.activeElement, trigger);
+});
+
+test("voice actor search folds text, tolerates a typo and waits for IME composition", (context) => {
+  context.after(() => closeDropdown(false, { immediate: true }));
+  const { document, addSelect } = fixture();
+  const viewport = Object.assign(new EventTarget(), {
+    offsetLeft: 0, offsetTop: 0, width: 1000, height: 700,
+  });
+  document.defaultView.visualViewport = viewport;
+  const voiceActor = addSelect("filter-va", "声优", [
+    { label: "全部声优", value: "" },
+    { label: "Mizuki Voice", value: "mizuki" },
+    { label: "海音みずき", value: "mione" },
+  ]);
+  voiceActor.dataset.dropdownSearch = "";
+  enhanceDropdowns(document.body, "");
+
+  const trigger = document.body.querySelector("#filter-va-trigger");
+  send(trigger, "click");
+  const menu = document.body.querySelector(".dropdown-menu-searchable");
+  assert.ok(menu, "expected the voice actor menu to offer search");
+  const input = menu.querySelector(".dropdown-search");
+  const listbox = menu.querySelector(".dropdown-results");
+
+  viewport.height = 310;
+  send(document.defaultView, "resize");
+  send(viewport, "resize");
+  assert.equal(trigger.getAttribute("aria-expanded"), "true");
+  assert.equal(document.activeElement, input);
+  assert.equal(menu.style.maxHeight, "206px");
+
+  typeSearch(input, "ＭＩＺＵＫＩ");
+  assert.deepEqual(visibleOptionLabels(listbox), ["Mizuki Voice"]);
+  typeSearch(input, "mizki");
+  assert.deepEqual(visibleOptionLabels(listbox), ["Mizuki Voice"]);
+
+  send(input, "compositionstart");
+  typeSearch(input, "みずき", { isComposing: true });
+  assert.deepEqual(visibleOptionLabels(listbox), ["Mizuki Voice"]);
+  assert.equal(send(input, "keydown", { key: "Enter", isComposing: true }).defaultPrevented, false);
+  assert.equal(voiceActor.value, "");
+  send(input, "compositionend");
+  assert.deepEqual(visibleOptionLabels(listbox), ["海音みずき"]);
+
+  assert.equal(send(input, "keydown", { key: "Escape" }).defaultPrevented, true);
+  assert.equal(menu.isConnected, false);
+  assert.equal(document.activeElement, trigger);
+  assert.equal(voiceActor.value, "");
+});
 
 test("enhancement retains the native select and dispatches only actual value changes", (context) => {
   context.after(() => closeDropdown());

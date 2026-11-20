@@ -476,6 +476,7 @@ textarea:focus-visible {
 }
 
 .search-box {
+  position: relative;
   display: flex;
   flex: 1 0 clamp(230px, 30vw, 450px);
   align-items: center;
@@ -530,6 +531,65 @@ textarea:focus-visible {
   color: var(--accent);
   font-size: 12px;
   white-space: nowrap;
+}
+
+.search-suggestions {
+  position: absolute;
+  z-index: 1;
+  inset-block-start: calc(100% + 6px);
+  inset-inline: -1px;
+  max-block-size: min(20rem, 50dvh);
+  padding: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 8px 24px var(--shadow);
+}
+
+.search-suggestions[hidden] {
+  display: none;
+}
+
+.search-suggestion {
+  display: grid;
+  inline-size: 100%;
+  min-block-size: 44px;
+  gap: 1px;
+  padding: 5px 8px;
+  border-color: transparent;
+  border-radius: 6px;
+  background: transparent;
+  outline-offset: -2px;
+  text-align: start;
+  transition: none;
+}
+
+button.search-suggestion:is(:hover, :active, [aria-selected="true"]) {
+  border-color: var(--border);
+  background: var(--panel-alt);
+  box-shadow: none;
+  transform: none;
+}
+
+.search-suggestion[aria-selected="true"] {
+  outline: 1px solid var(--accent);
+}
+
+.search-suggestion-title {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-suggestion-workno {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .topbar .sidebar-visibility-toggle {
@@ -913,6 +973,40 @@ textarea:focus-visible {
   outline-offset: 2px;
 }
 
+.dropdown-menu-searchable {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: clamp(15rem, 25vw, 26rem);
+  overflow: hidden;
+}
+
+.dropdown-search {
+  flex: none;
+  width: 100%;
+  min-width: 0;
+  background: var(--panel-alt);
+  font-size: 1rem;
+}
+
+.dropdown-search:focus-visible {
+  outline-offset: -2px;
+}
+
+.dropdown-results {
+  position: relative;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.dropdown-no-results {
+  padding: 6px 8px;
+  color: var(--muted);
+}
+
 .dropdown-option {
   display: flex;
   align-items: center;
@@ -925,6 +1019,10 @@ textarea:focus-visible {
   background: transparent;
   text-align: left;
   cursor: pointer;
+}
+
+.dropdown-option[hidden] {
+  display: none;
 }
 
 .dropdown-option:where(:not([aria-disabled="true"])):is(:hover, [data-active]) {

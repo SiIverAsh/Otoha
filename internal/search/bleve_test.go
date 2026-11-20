@@ -68,6 +68,48 @@ func TestBleveFuzzyKeywordSearch(t *testing.T) {
 	}
 }
 
+func TestBleveInvalidQueriesKeepIndexAvailable(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		input string
+	}{
+		{name: "unclosed quote", input: `"Moon`},
+		{name: "unfinished exclusion", input: "Moon -"},
+		{name: "unfinished field", input: "title:"},
+		{name: "unsupported fuzziness", input: "Moon~3"},
+		{name: "malformed regular expression", input: "/[/"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			index := Open(filepath.Join(t.TempDir(), "index.bleve"))
+			t.Cleanup(func() {
+				if err := index.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			const workno = "RJ123456"
+			if err := index.IndexWork(db.SearchDocument{Workno: workno, Title: "Moonlight"}); err != nil {
+				t.Fatal(err)
+			}
+
+			invalid, err := index.Search(tt.input, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if invalid.Degraded || invalid.NeedsReindex || len(invalid.Worknos) != 0 {
+				t.Errorf("invalid input %q returned %+v, want zero hits from a healthy index", tt.input, invalid)
+			}
+
+			valid, err := index.Search("nlight", 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if valid.Degraded || !slices.Equal(valid.Worknos, []string{workno}) {
+				t.Fatalf("fuzzy query after invalid input = %+v, want indexed hit for %s", valid, workno)
+			}
+		})
+	}
+}
+
 func TestBleveCJKQuerySyntaxAndDegradedFallback(t *testing.T) {
 	dir := t.TempDir()
 	store, err := db.Open(filepath.Join(dir, "otoha.db"))

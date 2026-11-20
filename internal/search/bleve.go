@@ -2,8 +2,11 @@ package search
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"regexp/syntax"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +20,7 @@ import (
 	_ "github.com/blevesearch/bleve/v2/analysis/lang/cjk"
 	"github.com/blevesearch/bleve/v2/mapping"
 	"github.com/blevesearch/bleve/v2/search/query"
+	"github.com/blevesearch/bleve/v2/search/searcher"
 )
 
 const (
@@ -223,6 +227,11 @@ func (e *Engine) SearchWithinWorks(ctx context.Context, queryStr string, maxHits
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		// Bleve compiles regular expressions when creating their searchers.
+		var patternErr *syntax.Error
+		if errors.As(err, &patternErr) {
+			return &SearchResult{Worknos: []string{}}, nil
+		}
 		e.mu.Lock()
 		e.degraded = true
 		e.lastErr = err.Error()
@@ -255,13 +264,33 @@ func buildSearchQuery(raw string, indexMapping mapping.IndexMapping) query.Query
 	qsq := bleve.NewQueryStringQuery(strings.Join(clauses, " "))
 	parsed, err := qsq.Parse()
 	if err != nil {
-		return qsq
+		// Live input can contain incomplete search syntax mid-edit.
+		return bleve.NewMatchNoneQuery()
 	}
 	var analyzer analysis.Analyzer
-	if !strings.ContainsRune(raw, '~') {
+	if strings.ContainsRune(raw, '~') {
+		if hasUnsupportedFuzziness(parsed) {
+			return bleve.NewMatchNoneQuery()
+		}
+	} else {
 		analyzer = indexMapping.AnalyzerNamed(indexMapping.AnalyzerNameForPath(indexMapping.DefaultSearchField()))
 	}
 	return expandKeywordMatches(parsed, analyzer)
+}
+
+// Bleve's parser accepts numeric edit distances outside its searcher's limits.
+func hasUnsupportedFuzziness(q query.Query) bool {
+	switch q := q.(type) {
+	case *query.MatchQuery:
+		return q.Fuzziness < 0 || q.Fuzziness > searcher.MaxFuzziness
+	case *query.BooleanQuery:
+		return hasUnsupportedFuzziness(q.Must) || hasUnsupportedFuzziness(q.Should) || hasUnsupportedFuzziness(q.MustNot)
+	case *query.ConjunctionQuery:
+		return slices.ContainsFunc(q.Conjuncts, hasUnsupportedFuzziness)
+	case *query.DisjunctionQuery:
+		return slices.ContainsFunc(q.Disjuncts, hasUnsupportedFuzziness)
+	}
+	return false
 }
 
 // Leave exclusions and phrase queries alone when expanding positive matches.
