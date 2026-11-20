@@ -7,12 +7,23 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/SiIverAsh/otoha/internal/db"
+	"github.com/SiIverAsh/otoha/internal/dlsite"
 	"github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/analysis"
 	_ "github.com/blevesearch/bleve/v2/analysis/lang/cjk"
 	"github.com/blevesearch/bleve/v2/mapping"
 	"github.com/blevesearch/bleve/v2/search/query"
+)
+
+const (
+	minPartialKeywordRunes = 3
+	minTypoKeywordRunes    = 4
+	partialKeywordBoost    = 0.3
+	typoKeywordBoost       = 0.1
 )
 
 // Engine wraps Bleve v2 with its CJK bigram analyzer (`cjk`) and gracefully degrades
@@ -168,7 +179,7 @@ type SearchResult struct {
 	Warning      string   `json:"warning,omitempty"`
 }
 
-// Search executes Bleve's native query_string query (supporting space-AND, `-exclude`, `"phrase"`, §6).
+// Search executes keyword search with fuzzy matches, conjunctions, exclusions and phrases.
 // If Bleve is corrupted or errors at query time, it sets Degraded=true so caller uses SQL LIKE fallback.
 func (e *Engine) Search(queryStr string, maxHits int) (*SearchResult, error) {
 	return e.SearchWithinWorks(context.Background(), queryStr, maxHits, nil)
@@ -199,7 +210,7 @@ func (e *Engine) SearchWithinWorks(ctx context.Context, queryStr string, maxHits
 		}, nil
 	}
 
-	bq := buildStrictQueryString(q)
+	bq := buildSearchQuery(q, idx.Mapping())
 	if worknos != nil {
 		if len(worknos) == 0 {
 			return &SearchResult{Worknos: worknos}, nil
@@ -232,10 +243,8 @@ func (e *Engine) SearchWithinWorks(ctx context.Context, queryStr string, maxHits
 	}, nil
 }
 
-// buildStrictQueryString prefixes bare top-level clauses with '+' so space-separated
-// keywords perform intersection (AND) while preserving `-exclude`, `+must`, and `"phrases"` (§6),
-// then feeds the result into bleve.NewQueryStringQuery.
-func buildStrictQueryString(raw string) query.Query {
+// buildSearchQuery requires each positive keyword and preserves Bleve query syntax.
+func buildSearchQuery(raw string, indexMapping mapping.IndexMapping) query.Query {
 	clauses := splitQueryClauses(raw)
 	for i, c := range clauses {
 		if strings.HasPrefix(c, "+") || strings.HasPrefix(c, "-") {
@@ -248,30 +257,69 @@ func buildStrictQueryString(raw string) query.Query {
 	if err != nil {
 		return qsq
 	}
-	tightenMatchOperators(parsed)
-	return parsed
+	var analyzer analysis.Analyzer
+	if !strings.ContainsRune(raw, '~') {
+		analyzer = indexMapping.AnalyzerNamed(indexMapping.AnalyzerNameForPath(indexMapping.DefaultSearchField()))
+	}
+	return expandKeywordMatches(parsed, analyzer)
 }
 
-func tightenMatchOperators(q query.Query) {
+// Leave exclusions and phrase queries alone when expanding positive matches.
+func expandKeywordMatches(q query.Query, analyzer analysis.Analyzer) query.Query {
 	switch v := q.(type) {
 	case *query.MatchQuery:
 		v.SetOperator(query.MatchQueryOperatorAnd)
+		return keywordAlternatives(v, analyzer)
 	case *query.BooleanQuery:
-		if v.Must != nil {
-			tightenMatchOperators(v.Must)
-		}
-		if v.Should != nil {
-			tightenMatchOperators(v.Should)
-		}
+		v.Must = expandKeywordMatches(v.Must, analyzer)
+		v.Should = expandKeywordMatches(v.Should, analyzer)
 	case *query.ConjunctionQuery:
-		for _, sub := range v.Conjuncts {
-			tightenMatchOperators(sub)
+		for i, sub := range v.Conjuncts {
+			v.Conjuncts[i] = expandKeywordMatches(sub, analyzer)
 		}
 	case *query.DisjunctionQuery:
-		for _, sub := range v.Disjuncts {
-			tightenMatchOperators(sub)
+		for i, sub := range v.Disjuncts {
+			v.Disjuncts[i] = expandKeywordMatches(sub, analyzer)
 		}
 	}
+	return q
+}
+
+func keywordAlternatives(match *query.MatchQuery, analyzer analysis.Analyzer) query.Query {
+	if analyzer == nil || match.Field() != "" {
+		return match
+	}
+	if strings.IndexFunc(match.Match, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && !unicode.IsMark(r)
+	}) >= 0 {
+		return match
+	}
+	tokens := analyzer.Analyze([]byte(match.Match))
+	if len(tokens) != 1 {
+		return match
+	}
+	token := tokens[0]
+	term := string(token.Term)
+	length := utf8.RuneCountInString(term)
+	isCJKUnigram := token.Type == analysis.Single && length == 1
+	if (length < minPartialKeywordRunes && !isCJKUnigram) || dlsite.IsValidWorkno(term) {
+		return match
+	}
+
+	// CJK substrings of two or more characters already match the indexed bigrams.
+	// A wildcard also finds CJK characters that only occur within a bigram.
+	partial := bleve.NewWildcardQuery("*" + term + "*")
+	partial.SetBoost(partialKeywordBoost * match.Boost())
+	alternatives := []query.Query{match, partial}
+	if length >= minTypoKeywordRunes && strings.IndexFunc(term, func(r rune) bool {
+		return !unicode.Is(unicode.Latin, r) && !unicode.IsMark(r)
+	}) < 0 {
+		typo := bleve.NewFuzzyQuery(term)
+		typo.SetFuzziness(1)
+		typo.SetBoost(typoKeywordBoost * match.Boost())
+		alternatives = append(alternatives, typo)
+	}
+	return bleve.NewDisjunctionQuery(alternatives...)
 }
 
 func splitQueryClauses(s string) []string {

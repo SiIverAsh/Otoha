@@ -3,11 +3,70 @@ package search
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/SiIverAsh/otoha/internal/db"
 	"github.com/SiIverAsh/otoha/internal/dlsite"
 )
+
+func TestBleveFuzzyKeywordSearch(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.bleve")
+	index := Open(indexPath)
+	works := []db.SearchDocument{
+		{Workno: "RJ123456", Title: "Moonlight 耳かき", VAs: []string{"Seraphina"}, Tags: []string{"Whispering"}},
+		{Workno: "RJ12345678", Title: "Moonlight 朝", VAs: []string{"Seraphina"}, Tags: []string{"Rain"}},
+		{Workno: "RJ123457", Title: "Moon", Tags: []string{"Rain"}},
+	}
+	if err := index.IndexWorkBatch(works); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	index = Open(indexPath)
+	t.Cleanup(func() {
+		if err := index.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	for _, tt := range []struct {
+		name    string
+		keyword string
+		want    []string
+	}{
+		{name: "partial title", keyword: "NLIGHT", want: []string{"RJ123456", "RJ12345678"}},
+		{name: "multiple edits exceed typo tolerance", keyword: "Serafina", want: nil},
+		{name: "single substitution", keyword: "Seraphena", want: []string{"RJ123456", "RJ12345678"}},
+		{name: "single CJK character", keyword: "か", want: []string{"RJ123456"}},
+		{name: "required terms across fields", keyword: "nlight hisper", want: []string{"RJ123456"}},
+		{name: "exclusion is literal", keyword: "nlight -Whisper", want: []string{"RJ123456", "RJ12345678"}},
+		{name: "matching exclusion removes result", keyword: "nlight -Rain", want: []string{"RJ123456"}},
+		{name: "quoted keyword stays literal", keyword: `"nlight"`, want: nil},
+		{name: "field query stays literal", keyword: "title:nlight", want: nil},
+		{name: "explicit zero fuzziness stays literal", keyword: "nlight~0", want: nil},
+		{name: "partial work number", keyword: "rj12345", want: []string{"RJ123456", "RJ12345678", "RJ123457"}},
+		{name: "numeric fragment of work number", keyword: "2345", want: []string{"RJ123456", "RJ12345678", "RJ123457"}},
+		{name: "full work number stays literal", keyword: "rj123456", want: []string{"RJ123456"}},
+		{name: "short Latin keyword stays literal", keyword: "Mo", want: nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := index.SearchWithinWorks(t.Context(), tt.keyword, 20, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Degraded {
+				t.Fatalf("index degraded: %s", result.Warning)
+			}
+			slices.Sort(result.Worknos)
+			if !slices.Equal(result.Worknos, tt.want) {
+				t.Fatalf("search %q = %v, want %v", tt.keyword, result.Worknos, tt.want)
+			}
+		})
+	}
+}
 
 func TestBleveCJKQuerySyntaxAndDegradedFallback(t *testing.T) {
 	dir := t.TempDir()

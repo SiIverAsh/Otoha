@@ -15,7 +15,6 @@ class TestElement extends EventTarget {
   offsetTop = 0;
   clientHeight = 120;
   scrollTop = 0;
-  classList = { add: (name) => { this.className = `${this.className} ${name}`.trim(); } };
 
   constructor(tag, document) {
     super();
@@ -54,8 +53,9 @@ class TestElement extends EventTarget {
 
   matches(selector) {
     if (selector === ":disabled") return Boolean(this.disabled);
-    if (selector === "select[id]:not([multiple]):not(.dropdown-source)") {
-      return this.tagName === "select" && this.id && !this.multiple && !this.matches(".dropdown-source");
+    if (selector === "select[id]:not([multiple]):not([data-dropdown-source])") {
+      return this.tagName === "select" && this.id && !this.multiple &&
+        !Object.hasOwn(this.dataset, "dropdownSource");
     }
     if (selector === '.dropdown-option:not([aria-disabled="true"])') {
       return this.matches(".dropdown-option") && this.getAttribute("aria-disabled") !== "true";
@@ -162,6 +162,34 @@ test("enhancement retains the native select and dispatches only actual value cha
   const reopened = document.body.querySelector(".dropdown-menu");
   send(reopened, "click", { target: reopened.children[1] });
   assert.equal(changes.length, 1);
+});
+
+test("switching to all age ratings keeps the replacement circle menu enhanced after settlement", (context) => {
+  context.after(() => closeDropdown());
+  const { document, addSelect } = fixture();
+  const first = addSelect("filter-circle", "社团", [{ label: "全部社团", value: "", count: 0 }]);
+  first.className = "previous-select";
+  enhanceDropdowns(document.body, "");
+
+  const replacement = addSelect("filter-circle", "社团", [
+    { label: "全部社团", value: "", count: 1 },
+    { label: "RaRo", value: "RaRo", count: 332 },
+  ]);
+  // HTMX temporarily carries over the classes of elements with matching IDs.
+  const incomingClass = replacement.className;
+  replacement.className = first.className;
+  first.parentElement.remove();
+  enhanceDropdowns(document.body, "");
+  replacement.className = incomingClass;
+
+  const trigger = document.body.querySelector("#filter-circle-trigger");
+  assert.ok(trigger);
+  assert.equal(replacement.getAttribute("aria-hidden"), "true");
+  send(trigger, "click");
+  const menu = document.body.querySelector(".dropdown-menu");
+  assert.equal(menu.children[1].querySelector(".dropdown-option-count").textContent, "332");
+  send(menu, "click", { target: menu.children[1] });
+  assert.equal(replacement.value, "RaRo");
 });
 
 test("opening another dropdown and Escape close the previous menu, and chapter changes retain the reset caption", (context) => {

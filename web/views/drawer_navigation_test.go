@@ -1,12 +1,45 @@
 package views
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/SiIverAsh/otoha/internal/db"
 )
+
+func TestDrawerVoiceActorsRenderAsSeparateFilterTags(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		actors []string
+	}{
+		{name: "no voice actors"},
+		{name: "one voice actor", actors: []string{"柚木つばめ"}},
+		{name: "multiple voice actors", actors: []string{"柚木つばめ", "梅木ちはる", "A & B / C"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			detail := db.WorkDetail{Work: db.Work{Workno: "RJ000001", VAs: testCase.actors}}
+			document := renderDrawerForNavigation(t, &detail)
+			tags := document.Find(".drawer-voice-actors > a.tag-pill[data-action=filter-va]")
+			if tags.Length() != len(testCase.actors) {
+				t.Fatalf("found %d voice actor tags, want %d", tags.Length(), len(testCase.actors))
+			}
+			for index, actor := range testCase.actors {
+				tag := tags.Eq(index)
+				if tag.Text() != actor || tag.AttrOr("data-val", "") != actor {
+					t.Errorf("tag %d should display and filter %q, got %q / %q",
+						index, actor, tag.Text(), tag.AttrOr("data-val", ""))
+				}
+				href := tag.AttrOr("href", "")
+				link, err := url.Parse(href)
+				if err != nil || link.Path != "/" || link.Query().Get("va") != actor {
+					t.Errorf("tag %d links to %q, want a catalog filter for %q", index, href, actor)
+				}
+			}
+		})
+	}
+}
 
 func TestDrawerExplicitSaveAndNonHLSFolders(t *testing.T) {
 	hls := &db.TrackTreeNode{Type: "audio", Name: "WAV 01", Track: &db.Track{ID: 1, StreamURL: "https://example.test/01.m3u8"}}

@@ -1,140 +1,125 @@
 # Otoha
 
-面向 DLsite 音声作品的开源自托管流媒体服务器。  
-Open-source, zero-CGO, single-binary self-hosted streaming server for user-owned DLsite voice works.
+Otoha（音葉）是面向 DLsite 音声作品的开源自托管媒体库。
+在电脑或 NAS 上启动服务，即可用浏览器整理本地音频，也可同步 ASMR.one 目录和导入 ASMR18 播放源。
 
----
+Open-source, self-hosted streaming server for DLsite audio works.
 
-## 核心特性
+## 安装与启动
 
-- **真正单文件静态编译（无 CGO / 无外部依赖）**：基于 Go 标准库 + `modernc.org/sqlite` + `blevesearch/bleve/v2`，**无需安装 Node.js、无需 FFmpeg**，单二进制内嵌 Web 前端与 SQL 迁移脚本，支持一键交叉编译至 `linux/arm64`（树莓派 / 低配 NAS 常驻内存 `< 150MB`）。
-- **原生支持 6 位与 8 位作品号**：精准识别 `RJ` / `BJ` / `VJ` 的 6 位与 8 位作品号（如 `RJ123456`、`RJ01234567`）以及 `RG\d{5}` 社团号、`SRI\d{10}` 系列号，彻底解决旧版 kikoeru 8 位号导入失败与静默截断问题。
-- **完全离线可用 + 四级容错元数据抓取**：
-  - 元数据优先走 `product.json`，动态销量/评分用 `info/ajax` 补齐，异常回落至作品页 HTML 解析；对翻译作品自动回溯原作品号与 `ja_jp` 补齐声优列表。
-  - 译版详情按已有原作编号关联作品，并分别显示译版发布社团和已入库原作的社团。
-  - 以上三级全部失败或字段残缺时，自动回落至 asmr.one 公开接口（四镜像按序降级）补齐标题、社团、声优与标签；该源可通过 `asmrone_enabled` 关闭，关闭后恢复纯 DLsite 行为。
-  - 所有抓取结果落盘缓存，重扫媒体库零重复请求；区分永久 `404` 与网络限流退避重试，支持随时中断与断点续传；同时提供手工编辑元数据与 JSON 备份导入/导出。
-  - 支持带用户名密码认证的 `HTTP` / `HTTPS` / `SOCKS5` 代理。
-- **保留原始多版本目录树 + 原生无损直出流媒体**：
-  - 完整保留 `SE有り` / `SE無し` 等多层子目录结构，纯 Go 解析 `.wav` / `.flac` / `.mp3` / `.m4a` / `.ogg` / `.opus` 时长；标准库 `http.ServeContent` 原生支持 `206 Partial Content` Range 拖动。
-  - 自动匹配同目录同主文件名 `.lrc` / `.vtt` / `.srt` / `.ass` 字幕，自动嗅探 `Shift-JIS` / `GBK` / `UTF-8 BOM` 并转码输出同步时间轴。
-- **会话聚合收听历史与严格隐私保护**：
-  - 30 秒定时心跳 + 暂停/拖动/切轨/切后台即时上报 + `navigator.sendBeacon` 兜底；30 分钟内自动聚合会话，通过 `queue_ctx` 精确还原多版本播放队列，基于实听时长 `listened` 自动推进 `listening -> listened`。
-  - 年龄分级一等公民：默认视图可完全隐藏非全年龄（R15/R18）作品，收听历史同步严格过滤不泄漏标题；支持全局关闭历史、临时无痕收听、按时间范围清除，并在清空后强制执行 SQLite `VACUUM` + WAL 截断擦除磁盘残留字节。
-- **零门槛只读 WebDAV (`/dav/`)** 与 **kikoeru 无损迁移工具 (`import-kikoeru`)**。
+从 [GitHub Releases](https://github.com/SiIverAsh/Otoha/releases) 下载对应系统和架构的压缩包。
+Windows、Linux 和 macOS 均有 `amd64` 和 `arm64` 构建，附件中的 `checksums.txt` 提供 SHA-256 校验值。
+解压后即可运行，Web 界面内嵌在程序中，运行时无需安装 Node.js 或 FFmpeg。
 
----
-
-## 合规与安全声明（必读）
-
-1. **仅管理自有文件**：Otoha 仅用于索引与流式播放**用户本人合法持有**的本地音频文件。本项目**不提供、不索引、不分发任何作品内容**，亦**不实现** DLsite 账号登录或已购作品批量下载器功能。
-2. **第三方元数据兜底说明**：asmr.one 为第三方聚合站，Otoha 仅在 DLsite 失败或字段残缺时读取其公开**元数据**接口，不请求、不索引、不分发其音频资源。
-3. **公网暴露安全警告**：Otoha 本身不内置内网穿透。若通过公网 IP、反向代理（Caddy / Nginx）、Cloudflare Tunnel 或 frp 对外暴露服务，**请务必开启多用户登录认证（`auth_enabled: true`）并强制全程启用 HTTPS**（或优先使用 Tailscale / WireGuard 组网访问），严防私人媒体库在公网裸奔被搜索引擎或扫描器抓取。
-
----
-
-## 快速开始
-
-### 1. 编译（零 CGO）
-
-Otoha 使用 Go 和 Templ 渲染页面，由 HTMX 局部更新作品列表、筛选结果和详情面板。
-播放器、字幕、队列以及浏览器本地收藏由内嵌的 JavaScript 模块处理。
-
-Windows PowerShell：
-
-```powershell
-$env:CGO_ENABLED = "0"
-go build -o otoha.exe .
-```
-
-交叉编译至树莓派 / ARM64 NAS：
-
-```powershell
-$env:CGO_ENABLED = "0"; $env:GOOS = "linux"; $env:GOARCH = "arm64"; go build -o otoha-linux-arm64 .
-```
-
-开发时编辑 [`web/views/`](web/views/) 中的 `.templ` 源文件，并运行 `go generate ./web/views` 更新对应的 Go 文件。
-`go build` 和 `go run` 会直接编译生成后的视图，并嵌入 [`web/src/`](web/src/) 下的 JavaScript、CSS 和第三方资源。
-客户端集成继续使用 `/api/` 下的 JSON 和媒体接口。
-
-### 2. 扫描本地音声目录并启动服务
-
-ASMR.one 全站同步的参数、曲目链接模式和断点限制见 [同步说明](docs/asmrone-sync.md)。
-
-```powershell
-# 离线扫描本地目录（不请求外网）
-.\otoha.exe scan --data .\data --root "D:\VOICES" --name Voices
-
-# 扫描并抓取公开元数据（支持带账密的 HTTP / SOCKS5 代理，3 秒礼貌限速，支持 Ctrl+C 断点续传）
-.\otoha.exe scan --data .\data --root "D:\VOICES" --scrape --proxy "socks5://user:pass@127.0.0.1:1080"
-
-# 增量断点同步 asmr.one 全站目录（按页实时入库 SQLite + Bleve，精确记录 next_page 断点、去重跳过与字段完整率）
-.\otoha.exe sync-asmrone --data .\data --page-size 100 --order id --sort asc
-
-# 启动流媒体与 Web 服务（默认监听 http://127.0.0.1:8090，只读 WebDAV 挂载于 /dav/）
-.\otoha.exe serve --addr 127.0.0.1:8090 --data .\data
-```
-
-### 3. 全文索引重建与多用户管理
-
-```powershell
-# 从 SQLite 真相源全量重建 Bleve CJK 索引
-.\otoha.exe reindex --data .\data
-
-# 创建管理员账号（用于开启认证及 WebDAV Basic Auth）
-.\otoha.exe user add --data .\data --username admin --password "your-strong-password" --admin
-```
-
-### 4. 从旧版 kikoeru 迁移数据库
-
-源数据库全程以 `mode=ro` + `PRAGMA query_only=ON` 只读打开，绝不修改旧库；自动使用磁盘路径复核并标记被 kikoeru 截断的 8 位 RJ 号冲突，同时探测兼容 `azuse` 分支的 `t_history` 历史表：
-
-```powershell
-# 先执行 Dry-Run 输出完整冲突与重抓报告（不写入新库）
-.\otoha.exe import-kikoeru --db "C:\kikoeru\sqlite\db.sqlite3" --covers "C:\kikoeru\covers" --root-map "Voices=D:\VOICES" --dry-run --report .\kikoeru-dryrun.json
-
-# 确认无误后正式事务导入
-.\otoha.exe import-kikoeru --db "C:\kikoeru\sqlite\db.sqlite3" --covers "C:\kikoeru\covers" --root-map "Voices=D:\VOICES" --data .\data --report .\kikoeru-import.json
-```
-
-### 5. 系统服务部署
-
-- **Windows 服务**：`.\otoha.exe service install --addr 127.0.0.1:8090 --data "C:\Otoha\data"`
-- **Linux systemd**：参考 [`deploy/otoha.service`](deploy/otoha.service) 或执行 `./otoha service systemd` 生成单元配置。
-
-### 6. Release 构建与发布
-
-`.github/workflows/release.yml` 在 main 推送、main 的 Pull Request 和手动运行时执行三平台测试。
-main 推送或手动运行后，还会生成 Linux、Windows、macOS 各 amd64/arm64 共六个平台的程序包，
-可在 Actions 的 `release-assets` artifact 下载（保留 14 天）；Pull Request 只运行检查。
-每个包包含程序、README、LICENSE 和部署示例，另附 SHA-256 校验和。
-
-main 构建成功后会自动创建或更新 [nightly 预发布版](https://github.com/SiIverAsh/Otoha/releases/tag/nightly)，
-可直接在 Releases 页面下载。手动在 main 上运行也会更新该预发布版；旧构建附件会被替换，
-Release 说明与 nightly 标签会指向本次构建的提交，正式版本的附件不受影响。
-
-推送版本标签会在测试及构建成功后自动发布 GitHub Release：
+在 Linux 或 macOS 中运行以下命令。
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+./otoha serve --data ./data
 ```
 
-标签格式为 `v主版本.次版本.修订号`，可带 `-rc.1` 等预发布后缀；带后缀的版本自动标为 Pre-release。
-二进制的 `--version` 会写入对应版本号；非标签构建显示 `dev-提交短哈希`。
-重跑同一标签会覆盖该 Release 的同名附件。发布使用内置 `GITHUB_TOKEN`，无需额外配置 PAT。
-当前没有 Android APK，手机可通过浏览器访问已部署的 Web 服务。
+在 Windows 上使用 PowerShell。
 
----
+```powershell
+.\otoha.exe serve --data .\data
+```
 
-## ASMR18 采集试用
+在同一台机器的浏览器打开 [http://127.0.0.1:8090](http://127.0.0.1:8090)。
+启动时指定的 `--data` 目录存放 SQLite 数据库、全文索引、封面、缓存和配置。
+以后启动、导入或维护同一媒体库时，沿用这个目录。
 
-支持从 `asmr18.fans` 采集作品元数据、HLS 播放源和章节，按 RJ 编号合并作品。
-音声库的「全部音源」下拉菜单可按 ASMR.one 或 ASMR18 筛选列表和搜索结果。
-同时关联两个音源的作品会出现在两个筛选结果中。
-可在“设置与存储”中预览并导入指定作品，或使用 `sync-asmr18` 命令。
-完整字段规则、代理配置和试用命令见 [ASMR18 接入说明](docs/asmr18-sync.md)。
+## 添加作品并开始播放
 
-## 开源许可
+| 音源 | 入口 | 播放方式 |
+| --- | --- | --- |
+| 本地目录 | **设置与存储 → 媒体库管理 → 存储与扫描 → 添加本地目录**。填写服务端可读的绝对路径，然后点击「扫描本地文件」。 | 直接传输原始音频，保留作品内的版本和子目录。 |
+| ASMR.one | **设置与存储 → 媒体库管理 → ASMR.one 同步**。可以同步最新 200 部或按页同步全站目录。 | 通过 Otoha 播放已取得的远程音轨。可按作品加载音轨，也可用命令批量同步音轨。 |
+| ASMR18 | **设置与存储 → 媒体库管理 → ASMR18 作品与播放源**。粘贴作品页地址，预览后点「导入作品」，也可按分类采集。 | 通过 Otoha 播放 HLS 流，支持跳转已有章节。 |
 
-本项目基于 [GNU General Public License v3.0 (GPL-3.0)](LICENSE) 开源发布。
+本地目录中的作品文件夹需要带有 6 位或 8 位的 `RJ`、`BJ` 或 `VJ` 作品号，例如 `[RJ01234567] 作品名`。
+如需封面、发售日或声优等公开信息，可选择「扫描并抓取 DLsite 元数据」。
+同一作品有本地音轨时，详情优先显示本地音轨。
+
+音声库支持按关键词搜索，并按音源、分级、社团、声优、标签、收听进度或字幕筛选。
+默认只显示标为全年龄的作品。
+刚扫描的本地作品如果还未分级，可以将筛选切换为「全年龄 + 未分级」。
+
+播放器支持队列、倍速、睡眠定时和字幕。
+本地字幕与音频放在同一目录，文件名只需扩展名不同，支持 `.lrc`、`.vtt`、`.srt` 和 `.ass`。
+服务端保存收听历史和续听进度，无痕收听时暂停记录。
+「我的收藏」和播放列表保存在当前浏览器，按账号区分。
+
+- [ASMR.one 同步说明](https://github.com/SiIverAsh/Otoha/blob/main/docs/asmrone-sync.md)，包括按页续跑和批量同步音轨。
+- [ASMR18 导入与播放说明](https://github.com/SiIverAsh/Otoha/blob/main/docs/asmr18-sync.md)，包括批量采集、补齐发售日和按章节分轨。
+- [Otoha Mobile](https://github.com/SiIverAsh/Otoha_mobile) 是独立的 Android 应用，可直接连接 ASMR.one 和 ASMR18。要访问自己的 Otoha 服务器，在手机浏览器中打开部署地址。
+
+请仅对有权访问的作品使用本地和远程播放功能，并遵守音源站点的使用条款。
+
+## 部署与维护
+
+Otoha 默认仅通过 HTTP 监听 `127.0.0.1:8090`，登录认证默认关闭。
+如需开放远程访问，先在「媒体库管理 → 用户账号」创建管理员，再在「偏好设置 → 访问与认证」开启多用户登录认证。
+通过 HTTPS 反向代理对外提供服务，并保留 Otoha 的本机监听地址。
+
+| 配置 | 用途 |
+| --- | --- |
+| `serve --addr` 或 `OTOHA_ADDR` | 设置服务的监听地址。 |
+| `serve --auth` 或 `OTOHA_AUTH=true` | 启动时开启认证。先创建可登录的账号。 |
+| `scraper_proxy` 或 `OTOHA_PROXY` | 设置服务端抓取代理。网页入口为「偏好设置 → 抓取与扫描」。 |
+| `webdav_enabled` | 控制默认开启的只读 `/dav/`，用于访问已配置的本地存储目录。启用登录认证后，WebDAV 客户端可用 HTTP Basic Auth 登录。 |
+
+配置文件为 `<数据目录>/config.json`。
+启动时环境变量覆盖文件中的对应配置，显式的命令行选项优先。
+Linux 可使用发行包中的 `deploy/otoha.service`，并为服务账号配置数据目录写权限和媒体目录读权限。
+
+服务运行时可在网页中扫描、同步或重建全文索引。
+改用命令行执行这些操作前，先停止使用同一数据目录的服务，以释放 Bleve 索引锁。
+以下命令在 Windows PowerShell 中将 `./otoha` 改为 `.\otoha.exe`，并调整媒体路径。
+
+```sh
+./otoha scan --data ./data --root "/path/to/voices" --name Voices
+./otoha reindex --data ./data
+```
+
+需要扫描时联网抓取缺失的元数据，可加 `--scrape`。
+网页的「备份与索引」支持导出和导入作品元数据 JSON。
+完整迁移服务器时，先停服再备份整个数据目录，并保留媒体文件及本地存储路径。
+
+### 从 kikoeru 迁移
+
+源 SQLite 数据库以只读方式打开。
+先生成迁移报告，检查作品号冲突和待补抓的条目。
+`--root-map` 将旧库中的存储别名映射到 Otoha 所在机器的实际路径。
+
+```sh
+./otoha import-kikoeru --db ./kikoeru.sqlite3 --data ./data \
+  --root-map "Voices=/path/to/voices" --dry-run --report ./kikoeru-dryrun.json
+```
+
+确认报告后，移除 `--dry-run` 并更换报告文件名，即可正式导入。
+如有旧封面目录，可同时指定 `--covers /path/to/covers`。
+
+## 源码构建与测试
+
+使用 [go.mod](https://github.com/SiIverAsh/Otoha/blob/main/go.mod) 中声明的 Go 版本。
+从源码目录执行 `CGO_ENABLED=0 go build -o otoha .`。
+Windows PowerShell 先执行 `$env:CGO_ENABLED = "0"`，再执行 `go build -o otoha.exe .`。
+
+页面由 Go 和 Templ 渲染，HTMX 用于局部更新。
+修改 `web/views` 下的 `.templ` 文件后，运行 `go generate ./web/views` 提交对应的生成文件。
+浏览器资源来自 `web/src`，JSON 和媒体接口位于 `/api/`。
+
+```sh
+go vet ./...
+go test ./...
+node --test web/test/*.test.mjs
+```
+
+浏览器模块测试使用 Node.js 24。
+发布工作流在 Linux、Windows 和 macOS 上运行检查。
+`main` 构建成功后更新 `nightly` 预发布版，推送有效的 `vX.Y.Z` 标签后发布对应版本。
+带 `-rc.1` 等后缀的标签会发布为预发布版。
+[发布工作流](https://github.com/SiIverAsh/Otoha/blob/main/.github/workflows/release.yml)
+
+## 许可证
+
+[GNU General Public License v3.0](LICENSE)。

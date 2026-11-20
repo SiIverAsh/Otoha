@@ -575,7 +575,7 @@ func topbar(shell Shell, fragment bool) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 40, "\" autocomplete=\"off\" title=\"支持空格交集、减号排除和引号短语\" aria-label=\"搜索作品\" placeholder=\"搜索标题、编号、声优…\"> ")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 40, "\" autocomplete=\"off\" title=\"支持模糊匹配、空格交集、减号排除和引号短语\" aria-label=\"搜索作品\" placeholder=\"搜索标题、编号、声优…\"> ")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

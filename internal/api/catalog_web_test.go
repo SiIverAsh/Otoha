@@ -130,6 +130,36 @@ func TestCatalogHTMLNavigation(t *testing.T) {
 		}
 	})
 
+	t.Run("fuzzy keyword search honors filters in HTML and JSON", func(t *testing.T) {
+		for _, keyword := range []string{"Moo", "Mooon"} {
+			t.Run(keyword, func(t *testing.T) {
+				params := url.Values{"q": {keyword + " -Second"}, "source": {"asmrone"}}
+				document, _ := getPage(t, "/?"+params.Encode(), true)
+				titles := document.Find(".work-card-title")
+				if titles.Length() != 1 || titles.Text() != title {
+					t.Errorf("HTML work titles = %q across %d cards, want only %q", titles.Text(), titles.Length(), title)
+				}
+
+				response := httptest.NewRecorder()
+				router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/search?"+params.Encode(), nil))
+				if response.Code != http.StatusOK {
+					t.Fatalf("search API status = %d, body %s", response.Code, response.Body)
+				}
+				var results struct {
+					Items    []db.Work `json:"items"`
+					Total    int       `json:"total"`
+					Degraded bool      `json:"degraded"`
+				}
+				if err := json.Unmarshal(response.Body.Bytes(), &results); err != nil {
+					t.Fatal(err)
+				}
+				if results.Degraded || results.Total != 1 || len(results.Items) != 1 || results.Items[0].Workno != "RJ100001" {
+					t.Fatalf("search API results = %+v, want one indexed hit for RJ100001", results)
+				}
+			})
+		}
+	})
+
 	t.Run("native selects retain missing facet values and escape source labels", func(t *testing.T) {
 		const missing = "旧选项 & <保留>"
 		query := url.Values{"circle": {missing}, "va": {missing}, "tag": {missing}, "page": {"4"}, "view": {"table"}}

@@ -1,51 +1,79 @@
-# ASMR.one 全站数据同步
+# ASMR.one 目录同步与播放
 
-项目现有入口为 `cmd/sync_asmrone.go`，调用 `internal/scrape/sync_asmrone.go` 的
-`SyncAsmrOneCatalog`，通过 `internal/asmrone/client.go` 请求公开 API。
+Otoha 可从 ASMR.one 导入作品目录，按需同步音轨，并通过自己的服务播放远程音频。
+目录同步按作品编号合并记录，将标题、社团、声优、标签、发售日、封面链接等已映射字段写入 SQLite，并尝试更新全文索引。
 
-## 全站作品目录
+## 在网页同步和播放
 
-```sh
-./otoha sync-asmrone --data ./data --page-size 100 --order id --sort asc
-```
+打开 **设置与存储 → 媒体库管理 → ASMR.one 同步**。
 
-Windows 将 `./otoha` 换成 `.\otoha.exe`。默认不限制页数，也不筛选有字幕作品，
-分页请求 `/api/works`，直到最后一页或空结果。API 客户端默认按
-`api.asmr-200.com`、`api.asmr.one`、`api.asmr-100.com`、`api.asmr-300.com` 尝试镜像，
-请求间隔默认 0.5 秒；可用 `--interval 1` 调整，或用 `--proxy socks5://127.0.0.1:1080` 指定代理。
+- **开始全站同步**或**继续全站同步**按作品 ID 升序同步目录，每页最多 100 部。
+- **同步最新 200 部**按收录时间倒序同步最多两页，并覆盖同一数据目录的同步断点。
+  之后再执行全站同步时，排序参数与该断点不匹配，会从第一页开始。
 
-作品标题、社团、声优、标签、日期、评分、销量、封面链接、版本等 API 返回且程序映射的字段
-按页写入 `data/otoha.db`，同时更新 `data/index.bleve` 搜索索引。
-这不是所有 API 端点或原始响应的完整备份，也不下载封面、音频或字幕文件。
+同步完成后，可在音声库的**全部音源**下拉菜单选择 **ASMR.one**。
+打开作品详情并点击**同步音轨**，即可为这部作品获取音轨树和可配对的字幕链接。
+开启 `asmrone_enabled` 时，打开没有任何音轨的作品详情也会尝试自动获取。
+关闭该选项会停用自动获取及 DLsite 抓取时的 ASMR.one 元数据补全，手动同步仍可使用。
 
-## 同时保存曲目树及远程链接
+目录同步保存封面链接，音轨同步保存媒体链接和附件信息。
+播放时，Otoha 按需代理远程音频和字幕，音频请求可转发 HTTP Range 以支持拖动播放进度。
 
-```sh
-./otoha sync-asmrone --data ./data --page-size 100 --order id --sort asc --include-tracks
-```
+## 使用命令行批量同步
 
-此模式额外逐作品请求 `/api/tracks/{id}`，保存曲目路径、大小、时长、远程播放/下载链接、
-配对字幕链接和附件信息。它会增加请求量，不会批量下载媒体文件。
-当前服务端也存在使用这些远程链接代理流式播放的实现。
-
-## 断点、补齐与核验
-
-- 断点保存在 `data/cache/asmrone/sync_checkpoint.json`，记录 `next_page`、统计和 `finished`。
-  用相同数据目录、排序、页大小和字幕筛选参数重新运行，会从记录的下一页继续。
-- `--max-pages 10` 可限制本次同步页数；`--subtitle-only` 会缩小同步范围，全站同步不要添加。
-- 若先同步目录、后增加 `--include-tracks`，必须加 `--reset-checkpoint` 从头遍历才能补齐之前的作品。
-  该参数重置游标，不清空数据库；已有作品会合并更新并计入 duplicates。
-- 当前曲目循环被中断后仍可能推进页游标，曲目请求失败也不会阻止该页完成。
-  要重试该页，可用 `--start-page N --include-tracks`；需要全量补齐时用
-  `--reset-checkpoint --include-tracks`。以完整跑完且失败数为零作为核验目标，
-  但曲目 404 不计失败，因此不能据此保证每个作品都有曲目。
-- 按页同步不是固定快照。站点删除、补录或排序变化可能影响分页；从头重跑可以合并刷新已有作品，
-  但不会自动删除站点已下架的作品。
-- 搜索索引写入错误和断点保存错误在当前实现中被忽略。`finished: true` 不能单独证明所有数据完整；
-  搜索异常时可执行 `./otoha reindex --data ./data` 从 SQLite 重建索引。
-
-补齐示例：
+服务运行时可在网页启动任务。
+使用以下命令操作同一数据目录前，先停止 Otoha 服务，以释放全文索引锁。
+Windows PowerShell 中将 `./otoha` 换成 `.\otoha.exe`。
 
 ```sh
-./otoha sync-asmrone --data ./data --order id --sort asc --include-tracks --reset-checkpoint
+# 先试同步一页目录
+./otoha sync-asmrone --data ./data --max-pages 1
+
+# 以相同筛选和排序继续同步剩余目录
+./otoha sync-asmrone --data ./data
+
+# 从第一页重新遍历并补齐音轨和字幕链接
+./otoha sync-asmrone --data ./data --reset-checkpoint --include-tracks
 ```
+
+默认按作品 ID 升序同步，每页 100 部，同步到最后一页或空结果为止。
+`--subtitle-only` 只同步源站标记有字幕的作品。
+`--include-tracks` 会为每部作品额外查询音轨，保存路径、时长、播放和下载地址等信息。
+同步期间只记录这些媒体地址，播放时再向源站请求相应内容。
+
+默认 API 镜像依次为 `api.asmr-200.com`、`api.asmr.one`、`api.asmr-100.com`、`api.asmr-300.com`。
+默认请求间隔为 0.5 秒，可用 `--interval 1` 调整，也可用 `--proxy socks5://127.0.0.1:1080` 临时指定代理。
+网页任务与播放使用服务端配置的 `scraper_proxy`，可通过 `OTOHA_PROXY` 环境变量覆盖。
+
+## 续跑和核验
+
+- 断点保存在数据目录的 `cache/asmrone/sync_checkpoint.json`，其中 `next_page` 记录下次请求的页码。
+  使用相同的排序字段、排序方向、页大小和字幕筛选参数，才会自动沿用该断点。
+- `--reset-checkpoint` 会忽略旧断点并从第一页开始，已入库的作品会合并更新。
+  先同步目录、之后才加 `--include-tracks` 时，用该参数补齐已经经过的页。
+- 一页内的曲目请求失败或中途中断后，页码仍可能推进。
+  可用 `--start-page N --max-pages 1 --include-tracks` 重试指定页，该次运行也会写入断点。
+- 源站的分页结果会随收录和下架变化。
+  从头同步会更新已有作品，已下架的记录仍会留在本地库。
+- 核验时查看失败数并检查所需作品的音轨。
+  曲目接口返回 404 时不计为失败，索引写入和断点保存错误也不计入统计，因此 `finished: true` 只表示遍历到了当时的末页或空页。
+  作品已入库但搜索不到时，可用 `./otoha reindex --data ./data` 从 SQLite 重建索引。
+
+## HTTP API
+
+`POST /api/asmrone/sync` 启动后台同步任务，支持 `page_size`、`start_page`、`max_pages`、`order`、`sort`、`subtitle_only`、`include_tracks` 和 `reset_checkpoint`。
+例如，发送以下 JSON 可从当前匹配的断点同步一页，并保存该页的音轨信息。
+
+```json
+{
+  "page_size": 100,
+  "order": "id",
+  "sort": "asc",
+  "max_pages": 1,
+  "include_tracks": true
+}
+```
+
+响应中的 `started` 标记是否启动了新任务。
+用 `GET /api/asmrone/status` 查看任务和断点状态，用 `POST /api/works/{workno}/sync-tracks` 同步单部已入库作品的音轨。
+服务启用认证时，这些请求需要通过认证。

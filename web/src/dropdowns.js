@@ -213,7 +213,8 @@ function showDropdown(control, preferLast = false) {
 /** Replace each single-select UI while retaining its native form control. */
 export function enhanceDropdowns(root, arrowHTML) {
   if (openDropdown && !openDropdown.trigger.isConnected) closeDropdown();
-  for (const select of root.querySelectorAll("select[id]:not([multiple]):not(.dropdown-source)")) {
+  // A data attribute survives HTMX class settlement without being copied to new selects.
+  for (const select of root.querySelectorAll("select[id]:not([multiple]):not([data-dropdown-source])")) {
     if (select.size > 1) continue;
     const document = select.ownerDocument;
     const labels = Array.from(select.labels ?? []);
@@ -236,7 +237,7 @@ export function enhanceDropdowns(root, arrowHTML) {
     caption.className = "dropdown-caption";
     trigger.append(caption);
     trigger.insertAdjacentHTML("beforeend", arrowHTML);
-    select.classList.add("dropdown-source");
+    select.dataset.dropdownSource = "";
     select.tabIndex = -1;
     select.setAttribute("aria-hidden", "true");
     select.before(wrapper);

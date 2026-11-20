@@ -123,9 +123,14 @@ templ drawerHeader(detail *db.WorkDetail) {
 					if len(detail.VAs) > 0 {
 						<div>
 							<dt>声优</dt>
-							<dd>
+							<dd class="drawer-voice-actors">
 								for _, actor := range detail.VAs {
-									<a href={ templ.URL("/?va=" + url.QueryEscape(actor)) } data-action="filter-va" data-val={ actor }>{ actor }</a>
+									<a
+										class="tag-pill"
+										href={ templ.URL("/?va=" + url.QueryEscape(actor)) }
+										data-action="filter-va"
+										data-val={ actor }
+									>{ actor }</a>
 								}
 							</dd>
 						</div>
