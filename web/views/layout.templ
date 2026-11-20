@@ -1,0 +1,232 @@
+package views
+
+import (
+	"strconv"
+
+	"github.com/SiIverAsh/otoha/internal/db"
+)
+
+// Shell holds the request state shared by the document and HTMX fragments.
+type Shell struct {
+	Tab               string
+	Query             CatalogQuery
+	User              *db.User
+	AuthEnabled       bool
+	HeartbeatInterval int
+}
+
+type navigationItem struct {
+	tab   string
+	path  string
+	glyph string
+	label string
+}
+
+func navigationItems() []navigationItem {
+	return []navigationItem{
+		{tab: "works", path: "/", glyph: "compass", label: "发现作品"},
+		{tab: "favorites", path: "/favorites", glyph: "heart", label: "我的收藏"},
+		{tab: "playlists", path: "/playlists", glyph: "list-music", label: "播放列表"},
+		{tab: "people", path: "/people", glyph: "users", label: "声优 / 社团"},
+		{tab: "tags", path: "/tags", glyph: "tag", label: "标签墙"},
+		{tab: "history", path: "/history", glyph: "history", label: "最近播放"},
+	}
+}
+
+func (shell Shell) navigationURL(path string) string {
+	if path == "/" {
+		return shell.Query.Reset().URL(path)
+	}
+	return shell.Query.BrowseURL(path)
+}
+
+// Document wraps HTML in the persistent browser shell.
+templ Document(content templ.Component) {
+	<!DOCTYPE html>
+	<html lang="zh-CN" data-theme="dark">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<meta name="color-scheme" content="dark light"/>
+			<meta name="htmx-config" content={ `{"historyCacheSize":0,"allowEval":false,"allowScriptTags":false}` }/>
+			<title>Otoha · 音葉</title>
+			<link rel="stylesheet" href="/assets/styles.css"/>
+			<script src="/assets/vendor/htmx-2.0.11.min.js" defer></script>
+			<script src="/assets/vendor/hls-1.6.13.min.js" defer></script>
+			<script type="module" src="/assets/app.js"></script>
+		</head>
+		<body hx-history="false">
+			@iconDefinitions()
+			<div id="app">@content</div>
+			<div id="notifications" class="notification-stack"></div>
+		</body>
+	</html>
+}
+
+// Workspace renders the document contents for an authenticated library request.
+templ Workspace(shell Shell, content templ.Component) {
+	<div class="layout" data-user-id={ strconv.FormatInt(shell.User.ID, 10) } data-heartbeat-interval={ strconv.Itoa(shell.HeartbeatInterval) } hx-sync="#page-content:replace">
+		@sidebar(shell)
+		<div class="workspace">
+			<main class="main-pane" data-page={ shell.Tab } hx-history-elt>
+				@topbar(shell, false)
+				<div id="page-content" class="page-content">
+					@pageState(shell)
+					@content
+				</div>
+			</main>
+			<div id="drawer-region" hx-sync="this:replace"></div>
+		</div>
+		<div id="player-region"></div>
+		<div id="playlist-picker-region"></div>
+	</div>
+}
+
+// PageFragment updates the page and the search controls while keeping playback mounted.
+templ PageFragment(shell Shell, content templ.Component) {
+	@topbar(shell, true)
+	@pageState(shell)
+	@content
+}
+
+templ pageState(shell Shell) {
+	<span hidden data-page-tab={ shell.Tab } data-home-url={ shell.navigationURL("/") } data-browse-query={ shell.Query.BrowseURL("") } data-view={ shell.Query.View }></span>
+}
+
+templ navigationLink(shell Shell, item navigationItem) {
+	<a
+		class="nav-item button-link"
+		title={ item.label }
+		href={ templ.URL(shell.navigationURL(item.path)) }
+		data-nav-path={ item.path }
+		data-nav-tab={ item.tab }
+		hx-boost="true"
+		hx-target="#page-content"
+		hx-swap="innerHTML"
+		if shell.Tab == item.tab {
+			aria-current="page"
+		}
+	>
+		@Icon(item.glyph)
+		<span class="nav-label">{ item.label }</span>
+	</a>
+}
+
+templ sidebar(shell Shell) {
+	<aside class="sidebar" id="library-sidebar" aria-hidden="false">
+		<div class="sidebar-brand">
+			<a class="brand button-link" href={ templ.URL(shell.navigationURL("/")) } data-nav-path="/" aria-label="Otoha 音声库" hx-boost="true" hx-target="#page-content" hx-swap="innerHTML">
+				<span class="brand-mark">@Icon("headphones")</span><span class="brand-name">Otoha</span>
+			</a>
+			<button type="button" class="icon-button sidebar-toggle" data-action="toggle-sidebar" aria-label="折叠为图标栏" aria-expanded="true" title="折叠为图标栏">
+				@Icon("panel")
+			</button>
+		</div>
+		<nav class="sidebar-nav" aria-label="音声库">
+			for _, item := range navigationItems() {
+				@navigationLink(shell, item)
+			}
+		</nav>
+		<div class="sidebar-footer">
+			@navigationLink(shell, navigationItem{tab: "settings", path: "/settings", glyph: "settings", label: "设置与存储"})
+			if shell.AuthEnabled {
+				<button class="nav-item" type="button" data-action="logout" title="退出登录">
+					@Icon("logout")
+					<span class="nav-label">退出 · { shell.User.Username }</span>
+				</button>
+			}
+		</div>
+	</aside>
+}
+
+templ topbar(shell Shell, fragment bool) {
+	<header
+		id="topbar"
+		class="topbar"
+		if fragment {
+			hx-swap-oob="outerHTML"
+		}
+	>
+		<button
+			type="button"
+			class="icon-button sidebar-visibility-toggle"
+			data-action="toggle-sidebar-visibility"
+			aria-controls="library-sidebar"
+			aria-expanded="true"
+			aria-label="收起侧边栏"
+			title="收起侧边栏"
+		>
+			@Icon("menu")
+		</button>
+		<form class="search-box" id="search-form" role="search" method="get" action="/" hx-boost="true" hx-target="#page-content" hx-swap="innerHTML" hx-push-url="true">
+			@Icon("search")
+			@CatalogHiddenFields(shell.Query, "q", "page")
+			<input
+				id="search-input"
+				name="q"
+				value={ shell.Query.Query }
+				autocomplete="off"
+				title="支持空格交集、减号排除和引号短语"
+				aria-label="搜索作品"
+				placeholder="搜索标题、编号、声优…"
+			/>
+			if shell.Query.Query != "" {
+				<a href={ templ.URL(shell.Query.WithoutSearch().URL("/")) } class="button-link icon-button search-clear" aria-label="清除搜索" title="清除搜索" hx-boost="true" hx-target="#page-content" hx-swap="innerHTML">@Icon("close")</a>
+			}
+			<button class="search-submit" type="submit" title="搜索">搜索</button>
+		</form>
+		<div class="topbar-actions">
+			if shell.Tab == "works" {
+				<form id="sort-form" action="/" method="get" hx-get="/" hx-trigger="change" hx-target="#page-content" hx-swap="innerHTML" hx-push-url="true">
+					@CatalogHiddenFields(shell.Query, "sort_by", "page")
+					<select id="filter-sort" name="sort_by" aria-label="作品排序">
+						for _, option := range CatalogSortOptions() {
+							<option value={ option.Value } selected?={ shell.Query.Options.SortBy == option.Value }>{ option.Label }</option>
+						}
+					</select>
+					<noscript><button type="submit">应用排序</button></noscript>
+				</form>
+				<a
+					href={ templ.URL(shell.Query.ReverseSort().URL("/")) }
+					class="button-link icon-button sort-direction"
+					hx-boost="true"
+					hx-target="#page-content"
+					hx-swap="innerHTML"
+					if shell.Query.Options.SortDesc {
+						aria-label="切换为升序"
+						title="当前为降序"
+					} else {
+						aria-label="切换为降序"
+						title="当前为升序"
+					}
+				>
+					if shell.Query.Options.SortDesc {
+						@Icon("sort")
+					} else {
+						@Icon("chevron-up")
+					}
+				</a>
+			}
+			<button type="button" class="icon-button active" data-action="show-task-status" aria-label="查看后台任务" title="查看后台任务" hidden>
+				@Icon("timer")
+			</button>
+			<button type="button" class="icon-button theme-toggle" data-action="toggle-theme" aria-label="切换到浅色主题" title="切换到浅色主题">
+				@Icon("sun")
+			</button>
+		</div>
+	</header>
+}
+
+// BrowserLibrary provides a mount point for the existing localStorage collection.
+templ BrowserLibrary() {
+	<div id="browser-library"><noscript>请启用 JavaScript 以访问此浏览器里的收藏和播放列表。</noscript></div>
+}
+
+// ErrorMessage renders a page error with a way back to the library.
+templ ErrorMessage(message string) {
+	<div class="empty-state" role="alert">
+		@Icon("headphones")
+		<h2>{ message }</h2>
+		<a class="button-link" href="/">返回媒体库</a>
+	</div>
+}

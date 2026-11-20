@@ -33,6 +33,7 @@ type Options struct {
 	ProxyURL       string
 	MinInterval    time.Duration
 	RequestTimeout time.Duration
+	Transport      http.RoundTripper // optional shared proxy/rate-limited transport
 }
 
 type Client struct {
@@ -58,9 +59,13 @@ func New(opts Options) (*Client, error) {
 	if opts.RequestTimeout <= 0 {
 		opts.RequestTimeout = 20 * time.Second
 	}
-	tr, err := dlsite.BuildHTTPTransport(opts.ProxyURL)
-	if err != nil {
-		return nil, err
+	tr := opts.Transport
+	if tr == nil {
+		var err error
+		tr, err = dlsite.BuildHTTPTransport(opts.ProxyURL)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &Client{
 		opts:       opts,

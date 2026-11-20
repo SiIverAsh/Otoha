@@ -1,0 +1,351 @@
+package views
+
+import (
+	"maps"
+	"slices"
+	"strconv"
+	"strings"
+
+	"github.com/SiIverAsh/otoha/internal/db"
+)
+
+// CatalogHiddenFields carries query state across GET form submissions.
+templ CatalogHiddenFields(query CatalogQuery, omit ...string) {
+	{{ values := query.Values() }}
+	for _, key := range slices.Sorted(maps.Keys(values)) {
+		if !slices.Contains(omit, key) {
+			<input type="hidden" name={ key } value={ values.Get(key) }/>
+		}
+	}
+}
+
+// Catalog renders the paginated catalog, its controls, and recently played works.
+templ Catalog(data CatalogData) {
+	if data.SearchDegraded {
+		<div class="banner-warn">
+			<span>全文索引处于降级模式（已自动切换为 SQL LIKE 检索）：{ data.SearchWarning }</span>
+			<button type="button" data-action="reindex-bleve">立即重建索引</button>
+		</div>
+	}
+	<div class="page-heading">
+		<div>
+			if data.Query.Query != "" {
+				<h1>搜索结果</h1>
+			} else {
+				<h1>发现作品</h1>
+			}
+			<span class="page-count">{ catalogCount(data.Total) }</span>
+		</div>
+		<div class="page-actions">
+			<div class="view-toggle" aria-label="作品显示方式">
+				@catalogViewLink(data.Query, "grid", "grid", "封面网格")
+				@catalogViewLink(data.Query, "table", "list", "紧凑表格")
+			</div>
+		</div>
+	</div>
+	if len(data.Recent) > 0 {
+		@catalogRecent(data)
+	}
+	@catalogFilters(data)
+	if len(data.Works) == 0 {
+		@catalogEmpty(data.Query)
+	} else if data.Query.View == "table" {
+		@catalogTable(data.Works)
+	} else {
+		@catalogGrid(data.Works)
+	}
+	if data.totalPages() > 1 || data.Query.Options.Page > 1 {
+		@catalogPagination(data)
+	}
+}
+
+templ catalogViewLink(query CatalogQuery, view, glyph, label string) {
+	<a
+		{ CatalogLinkAttributes(query.viewURL(view))... }
+		class={ "button-link icon-button", templ.KV("active", query.View == view) }
+		aria-label={ label }
+		title={ label }
+		data-view={ view }
+		if query.View == view {
+			aria-current="true"
+		}
+	>
+		@Icon(glyph)
+	</a>
+}
+
+templ catalogRecent(data CatalogData) {
+	<section aria-labelledby="recent-heading">
+		<div class="section-heading">
+			<h2 id="recent-heading">继续收听</h2>
+			<a { CatalogLinkAttributes(data.Query.BrowseURL("/history"))... } class="button-link">
+				最近播放 @Icon("chevron-right")
+			</a>
+		</div>
+		<div class="recent-strip">
+			for _, entry := range data.Recent {
+				<button
+					type="button"
+					class="recent-chip"
+					data-action="resume-recent"
+					data-entry={ templ.JSONString(entry) }
+					data-workno={ entry.Workno }
+					title={ entry.WorkTitle }
+				>
+					<img src={ CoverURL(entry.Workno) } alt="" loading="lazy" decoding="async"/>
+					<span class="recent-meta">
+						<span class="recent-title">{ entry.WorkTitle }</span>
+						<span class="recent-sub">{ FormatDuration(entry.Position) } · { displayOr(entry.TrackName, entry.Workno) }</span>
+					</span>
+					@Icon("play")
+				</button>
+			}
+		</div>
+	</section>
+}
+
+templ catalogFilters(data CatalogData) {
+	{{ opts := data.Query.Options }}
+	<form
+		id="catalog-filters"
+		class="filter-strip"
+		action="/"
+		method="get"
+		hx-get="/"
+		hx-trigger="change, submit"
+		hx-target="#page-content"
+		hx-swap="innerHTML"
+		hx-push-url="true"
+	>
+		@CatalogHiddenFields(data.Query, "page", "source", "age", "progress", "circle", "va", "tag")
+		<select id="filter-source" name="source" aria-label="音源">
+			<option value="" selected?={ opts.Source == db.AllWorkSources }>全部音源</option>
+			<option value="asmrone" selected?={ opts.Source == db.ASMRoneSource }>ASMR.one</option>
+			<option value="asmr18" selected?={ opts.Source == db.ASMR18Source }>ASMR18</option>
+		</select>
+		<select id="filter-age" name="age" aria-label="作品分级">
+			for _, option := range catalogAgeOptions() {
+				<option value={ option.Value } selected?={ opts.AgeMode == option.Value }>{ option.Label }</option>
+			}
+		</select>
+		<select id="filter-progress" name="progress" aria-label="收听进度">
+			<option value="" selected?={ opts.Progress == "" }>全部进度</option>
+			for _, option := range CatalogProgressOptions()[1:] {
+				<option value={ option.Value } selected?={ opts.Progress == option.Value }>{ option.Label }</option>
+			}
+		</select>
+		@facetSelect("circle", "社团", opts.Circle, data.Circles)
+		@facetSelect("va", "声优", opts.VA, data.VAs)
+		@facetSelect("tag", "标签", opts.Tag, data.Tags)
+		<a
+			{ CatalogLinkAttributes(data.Query.subtitleURL())... }
+			class={ "button-link", templ.KV("active", opts.SubtitleOnly) }
+			if opts.SubtitleOnly {
+				aria-current="true"
+				aria-label="显示带字幕和不带字幕的作品"
+			}
+		>
+			@Icon("captions")
+			带字幕
+		</a>
+		if data.Query.HasFilters() {
+			<a { CatalogLinkAttributes(data.Query.Reset().URL("/"))... } class="button-link" data-clear-work-filters>清除筛选</a>
+		}
+		<noscript><button type="submit">筛选</button></noscript>
+	</form>
+}
+
+templ facetSelect(kind, label, selected string, entries []db.FacetCount) {
+	<select id={ "filter-" + kind } name={ kind } aria-label={ label } title={ displayOr(selected, "全部" + label) }>
+		<option value="" data-count={ strconv.Itoa(len(entries)) } selected?={ selected == "" }>全部{ label }</option>
+		if selected != "" && !slices.ContainsFunc(entries, func(entry db.FacetCount) bool { return entry.Name == selected }) {
+			<option value={ selected } selected>{ selected }</option>
+		}
+		for _, entry := range entries {
+			<option value={ entry.Name } data-count={ strconv.Itoa(entry.Count) } selected?={ selected == entry.Name }>{ entry.Name }</option>
+		}
+	</select>
+}
+
+templ catalogEmpty(query CatalogQuery) {
+	<div class="empty-state">
+		if query.HasFilters() {
+			@Icon("search")
+			<h2>暂无匹配作品</h2>
+			<p>试试其他关键词或调整筛选条件。</p>
+		} else {
+			@Icon("headphones")
+			<h2>作品库为空</h2>
+			<p>在设置中添加音源或扫描本地存储。</p>
+			<a { CatalogLinkAttributes(query.BrowseURL("/settings"))... } class="button-link primary">打开设置</a>
+		}
+	</div>
+}
+
+templ catalogGrid(works []db.Work) {
+	<div class="card-grid">
+		for _, work := range works {
+			<article class="work-card" data-work-card={ work.Workno }>
+				<button type="button" class="work-card-open" data-action="open-work" data-workno={ work.Workno } aria-label={ "查看 " + work.Title }>
+					<span class="work-cover">
+						@Icon("headphones")
+						<img src={ CoverURL(work.Workno) } alt="" loading="lazy" decoding="async"/>
+						<span class="cover-overlay"><span class="cover-play">@Icon("chevron-right")</span></span>
+					</span>
+					<span class="work-card-body">
+						<span class="work-card-kicker">
+							<span class="mono">{ work.Workno }</span>
+							@AgeBadge(work.AgeCategory)
+							if work.HasSubtitle {
+								<span class="badge badge-sfw">字幕</span>
+							}
+						</span>
+						<span class="work-card-title" title={ work.Title }>{ work.Title }</span>
+						if creators := catalogWorkCreators(work); creators != "" {
+							<span class="work-card-meta" title={ creators }>{ creators }</span>
+						}
+						if len(work.Tags) > 0 {
+							<span class="work-card-tags">
+								for _, tag := range work.Tags[:min(2, len(work.Tags))] {
+									<span class="tag-pill">{ tag.Name }</span>
+								}
+							</span>
+						}
+					</span>
+				</button>
+				@FavoriteButton(work, "icon-button card-favorite")
+				@DLsiteLink(work, "card-dlsite", "")
+			</article>
+		}
+	</div>
+}
+
+// FavoriteButton renders the control for the client-side collection.
+templ FavoriteButton(work db.Work, className string) {
+	<button
+		type="button"
+		class={ className }
+		data-action="toggle-favorite"
+		data-workno={ work.Workno }
+		data-work={ favoriteWorkJSON(work) }
+		aria-label="收藏作品"
+		aria-pressed="false"
+		title="收藏作品"
+	>
+		@Icon("heart")
+	</button>
+}
+
+templ catalogTable(works []db.Work) {
+	<div class="table-scroll">
+		<table class="compact-table works-table">
+			<thead>
+				<tr>
+					<th style="width:98px;">作品号</th>
+					<th style="width:62px;">分级</th>
+					<th>标题</th>
+					<th style="width:130px;">社团</th>
+					<th style="width:150px;">声优</th>
+					<th style="width:190px;">标签</th>
+					<th style="width:66px;">进度</th>
+					<th style="width:56px;">音轨</th>
+					<th style="width:86px;">发售日</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, work := range works {
+					<tr data-action="open-work" data-workno={ work.Workno } data-work-card={ work.Workno } title={ tableWorkTooltip(work) }>
+						<td class="mono">{ work.Workno }</td>
+						<td>@AgeBadge(work.AgeCategory)</td>
+						<td class="work-title-cell">
+							<div class="table-work-entry">
+								<button type="button" class="table-work-title" data-action="open-work" data-workno={ work.Workno }>
+									if work.HasSubtitle {
+										<span class="badge badge-sfw">字</span>
+									}
+									{ work.Title }
+								</button>
+								@DLsiteLink(work, "table-dlsite", "")
+							</div>
+						</td>
+						<td>{ displayOr(work.CircleName, "-") }</td>
+						<td title={ strings.Join(work.VAs, ", ") }>{ displayOr(strings.Join(work.VAs, " / "), "-") }</td>
+						<td title={ tagNames(work.Tags) }>
+							for _, tag := range work.Tags[:min(3, len(work.Tags))] {
+								<span class={ "tag-pill", templ.KV("user-tag", tag.Source == "user") }>{ tag.Name }</span>
+							}
+						</td>
+						<td>{ ProgressLabel(work.Progress) }</td>
+						<td>{ strconv.Itoa(work.TrackCount) }</td>
+						<td class="mono">{ displayOr(work.ReleaseDate, "-") }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	</div>
+}
+
+templ catalogPagination(data CatalogData) {
+	{{ page, totalPages := data.Query.Options.Page, data.totalPages() }}
+	<nav class="pagination" aria-label="作品页码">
+		if page > 1 {
+			<a { CatalogLinkAttributes(data.Query.pageURL(min(page-1, totalPages)))... } class="button-link">
+				@Icon("chevron-left")
+				上一页
+			</a>
+		} else {
+			<button type="button" disabled>@Icon("chevron-left") 上一页</button>
+		}
+		<span>第 { strconv.Itoa(page) } / { strconv.Itoa(totalPages) } 页</span>
+		if page < totalPages {
+			<a { CatalogLinkAttributes(data.Query.pageURL(page+1))... } class="button-link">
+				下一页
+				@Icon("chevron-right")
+			</a>
+		} else {
+			<button type="button" disabled>下一页 @Icon("chevron-right")</button>
+		}
+	</nav>
+}
+
+// CatalogIndex renders the voice actor, circle, or tag index.
+templ CatalogIndex(data CatalogData, tab string) {
+	<div class="page-heading">
+		<div>
+			if tab == "tags" {
+				<h1>标签墙</h1>
+			} else {
+				<h1>声优 / 社团索引</h1>
+			}
+		</div>
+	</div>
+	if tab == "tags" {
+		@catalogFacetSection(data.Query, "tag", "标签", data.Tags)
+	} else {
+		@catalogFacetSection(data.Query, "va", "声优", data.VAs)
+		@catalogFacetSection(data.Query, "circle", "社团", data.Circles)
+	}
+}
+
+templ catalogFacetSection(query CatalogQuery, kind, label string, entries []db.FacetCount) {
+	{{ tagWall := kind == "tag" }}
+	<section>
+		if !tagWall {
+			<div class="section-heading"><h2>{ label }</h2></div>
+		}
+		<div class={ templ.KV("tag-wall", tagWall), templ.KV("facet-grid", !tagWall) }>
+			if len(entries) == 0 {
+				<p class="works-empty">当前筛选条件下暂无{ label }</p>
+			}
+			for _, entry := range entries {
+				<a
+					{ CatalogLinkAttributes(query.facetURL(kind, entry.Name))... }
+					class={ "button-link", templ.KV("quick-tag", tagWall), templ.KV("facet-card", !tagWall) }
+				>
+					<span class="facet-name">{ entry.Name }</span>
+					<span class="facet-count">{ strconv.Itoa(entry.Count) }</span>
+				</a>
+			}
+		</div>
+	</section>
+}

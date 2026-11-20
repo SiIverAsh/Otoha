@@ -17,7 +17,6 @@ import (
 	"github.com/SiIverAsh/otoha/internal/db"
 	"github.com/SiIverAsh/otoha/internal/history"
 	"github.com/SiIverAsh/otoha/internal/search"
-	"github.com/SiIverAsh/otoha/web"
 )
 
 func runServe(args []string) error {
@@ -54,22 +53,16 @@ func runServe(args []string) error {
 		logger.Printf("WARNING: %s", warn)
 	}
 
-	distFS, err := web.DistFS()
-	if err != nil {
-		return fmt.Errorf("load embedded frontend: %w", err)
-	}
-
 	histSvc := history.NewService(store, cfg)
 	taskMgr := api.NewTaskManager(store, searchEng, cfg, logger)
 
 	router := api.NewRouter(api.Dependencies{
-		Store:    store,
-		Search:   searchEng,
-		History:  histSvc,
-		Cfg:      cfg,
-		Tasks:    taskMgr,
-		Logger:   logger,
-		Frontend: distFS,
+		Store:   store,
+		Search:  searchEng,
+		History: histSvc,
+		Cfg:     cfg,
+		Tasks:   taskMgr,
+		Logger:  logger,
 	})
 
 	srv := &http.Server{

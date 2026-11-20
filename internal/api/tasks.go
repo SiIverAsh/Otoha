@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SiIverAsh/otoha/internal/asmr18"
 	"github.com/SiIverAsh/otoha/internal/config"
 	"github.com/SiIverAsh/otoha/internal/db"
 	"github.com/SiIverAsh/otoha/internal/dlsite"
@@ -20,6 +21,7 @@ import (
 
 // TaskSnapshot represents the current scan/scrape background job state for REST and SSE (§9).
 type TaskSnapshot struct {
+	ASMR18Preview *asmr18.Work                  `json:"asmr18_preview,omitempty"`
 	Running       bool                          `json:"running"`
 	Phase         string                        `json:"phase"` // "idle" | "scanning" | "scraping" | "syncing_asmrone" | "done" | "cancelled" | "error"
 	Message       string                        `json:"message"`
@@ -71,6 +73,13 @@ func (tm *TaskManager) Snapshot() TaskSnapshot {
 
 func (tm *TaskManager) SnapshotJSON() any {
 	return tm.Snapshot()
+}
+
+// SettingsTaskProgress returns the current catalog checkpoint and preview.
+func (tm *TaskManager) SettingsTaskProgress() (*scrape.AsmrOneSyncCheckpoint, *asmr18.Work) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.state.AsmrSync, tm.state.ASMR18Preview
 }
 
 func (tm *TaskManager) publish(mut func(*TaskSnapshot)) {

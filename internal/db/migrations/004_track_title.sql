@@ -1,0 +1,1 @@
+ALTER TABLE track ADD COLUMN display_title TEXT NOT NULL DEFAULT '';

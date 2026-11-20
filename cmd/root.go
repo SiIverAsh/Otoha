@@ -34,6 +34,12 @@ func Execute(args []string) error {
 		return runScan(args[1:])
 	case "reindex":
 		return runReindex(args[1:])
+	case "sync-asmr18":
+		return runSyncASMR18(args[1:])
+	case "split-asmr18":
+		return runSplitASMR18(args[1:])
+	case "enrich-metadata":
+		return runEnrichMetadata(args[1:])
 	case "sync-asmrone":
 		return runSyncAsmrOne(args[1:])
 	case "import-kikoeru":
@@ -60,6 +66,9 @@ func printUsage() {
 Usage:
   otoha [serve] [--addr 127.0.0.1:8090] [--data ./data]
   otoha scan [--data ./data] [--root <dir>] [--name <alias>] [--scrape] [--force]
+  otoha sync-asmr18 [--data ./data] [--proxy URL] [--dry-run] [--category allages] [work-page-urls...]
+  otoha split-asmr18 [--data ./data] [--chapters-only] [--dry-run] [--max-works N] [RJ-numbers...]
+  otoha enrich-metadata [--data ./data] [--all | --date-only] [--workers 4] [--rps 2] [RJ-numbers...]
   otoha sync-asmrone [--data ./data] [--page-size 100] [--max-pages 0] [--include-tracks]
   otoha reindex [--data ./data]
   otoha import-kikoeru --db <path/to/kikoeru.sqlite3> [--covers <dir>] [--root-map alias=path] [--dry-run] [--report <file>]

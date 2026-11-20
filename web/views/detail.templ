@@ -1,0 +1,317 @@
+package views
+
+import (
+	"cmp"
+	"fmt"
+	"net/url"
+	"strings"
+
+	"github.com/SiIverAsh/otoha/internal/db"
+)
+
+// AgeBadge displays the catalog rating for a work.
+templ AgeBadge(category int) {
+	switch category {
+		case 1:
+			<span class="badge badge-sfw">全年龄</span>
+		case 2:
+			<span class="badge badge-r15">R15</span>
+		case 3:
+			<span class="badge badge-r18">R18</span>
+		default:
+			<span class="badge badge-unk">未分级</span>
+	}
+}
+
+// DLsiteLink renders the work's external product page or DLsite search link.
+templ DLsiteLink(work db.Work, className string, text string) {
+	<a
+		class={ "dlsite-link", className }
+		href={ templ.URL(DLsiteURL(work)) }
+		target="_blank"
+		rel="noopener noreferrer"
+		aria-label={ dlsiteLinkLabel(work) }
+		title={ dlsiteLinkLabel(work) }
+	>
+		if text != "" {
+			<span>{ text }</span>
+		}
+		@Icon("external")
+	</a>
+}
+
+// WorkDrawer renders work metadata, user state, and the playable track tree.
+templ WorkDrawer(detail *db.WorkDetail, payload string, editing bool) {
+	<aside class="drawer" data-workno={ detail.Workno } data-detail={ payload } aria-label="作品详情">
+		<div class="drawer-toolbar">
+			<span class="mono">
+				{ detail.Workno }
+				@AgeBadge(detail.AgeCategory)
+				if detail.HasSubtitle {
+					<span class="badge badge-sfw">含字幕</span>
+				}
+			</span>
+			<div class="drawer-actions">
+				@FavoriteButton(detail.Work, "icon-button")
+				<button type="button" data-action="sync-work-tracks" title="从 asmr.one 同步远端音轨树与字幕">同步音轨</button>
+				<button type="button" data-action="toggle-edit-meta" aria-expanded={ fmt.Sprint(editing) }>
+					if editing {
+						取消编辑
+					} else {
+						编辑
+					}
+				</button>
+				<button type="button" data-action="scrape-work" title="刷新该作品元数据">刷新</button>
+				<button type="button" class="icon-button" data-action="close-drawer" aria-label="关闭作品详情" title="关闭 (Esc)">
+					@Icon("close")
+				</button>
+			</div>
+		</div>
+		@drawerHeader(detail)
+		if editing {
+			@drawerMetadataEditor(detail)
+		}
+		@drawerPersonalState(detail)
+		<div class="drawer-section">
+			<div class="drawer-section-title">
+				<span>音轨目录树 ({ fmt.Sprint(len(detail.Tracks)) })</span>
+				<span style="font-weight:400;">按目录建队</span>
+			</div>
+			if len(detail.Tree) > 0 {
+				@drawerTrackNodes(detail.Tree, detail.Workno, "")
+			} else {
+				<div style="color:var(--muted);">暂无本地音轨文件</div>
+			}
+		</div>
+		@drawerAttachments(parseMetadataList[drawerAttachment](detail.RemoteFilesJSON))
+		if len(detail.Paths) > 0 {
+			<div class="drawer-section">
+				<div class="drawer-section-title">存储路径 ({ fmt.Sprint(len(detail.Paths)) })</div>
+				for _, path := range detail.Paths {
+					<div class="mono" style="color:var(--muted);font-size:11px;word-break:break-all;">[{ path.StorageName }] { path.RelPath }</div>
+				}
+			</div>
+		}
+	</aside>
+}
+
+templ drawerHeader(detail *db.WorkDetail) {
+	{{
+		editions := drawerEditions(detail.LanguageEditionsJSON)
+		original := originalWorkno(detail)
+		circle := cmp.Or(detail.CircleName, detail.CircleID)
+	}}
+	<div class="drawer-header">
+		<div class="drawer-hero">
+			<img class="drawer-cover" src={ CoverURL(detail.Workno) } alt=""/>
+			<div class="drawer-hero-copy">
+				<h2 class="drawer-title">{ detail.Title }</h2>
+				<dl class="drawer-meta">
+					if circle != "" {
+						<div>
+							if original != "" {
+								<dt>译版社团</dt>
+							} else {
+								<dt>社团</dt>
+							}
+							<dd><a href={ templ.URL("/?circle=" + url.QueryEscape(circle)) } data-action="filter-circle" data-val={ circle }>{ circle }</a></dd>
+						</div>
+					}
+					if original != "" {
+						@drawerOriginalWork(detail, original)
+					}
+					if len(detail.VAs) > 0 {
+						<div>
+							<dt>声优</dt>
+							<dd>
+								for _, actor := range detail.VAs {
+									<a href={ templ.URL("/?va=" + url.QueryEscape(actor)) } data-action="filter-va" data-val={ actor }>{ actor }</a>
+								}
+							</dd>
+						</div>
+					}
+					if detail.ReleaseDate != "" {
+						<div><dt>发售</dt><dd><time>{ detail.ReleaseDate }</time></dd></div>
+					}
+				</dl>
+			</div>
+		</div>
+		<dl class="drawer-stats" title={ workCredits(detail) }>
+			for _, stat := range workStats(detail) {
+				<div><dt>{ stat.label }</dt><dd>{ stat.value }</dd></div>
+			}
+		</dl>
+		if len(editions) > 0 {
+			<div class="drawer-editions" role="group" aria-label="语言版本">
+				for _, edition := range editions {
+					<button
+						type="button"
+						class={ "tag-pill drawer-edition", templ.KV("user-tag", edition.Workno == detail.Workno) }
+						data-action="jump-edition"
+						data-workno={ edition.Workno }
+						title={ "切换/检索语言版本 " + edition.Workno }
+					>
+						<span class="drawer-edition-language">{ edition.displayLanguage() }</span><span class="mono">{ edition.Workno }</span>
+					</button>
+				}
+			</div>
+		}
+		<div class="drawer-link-row">
+			@DLsiteLink(detail.Work, "drawer-dlsite", "在 DLsite 查看")
+		</div>
+	</div>
+}
+
+templ drawerOriginalWork(detail *db.WorkDetail, workno string) {
+	<div>
+		<dt>原作</dt>
+		<dd>
+			if detail.OriginalWork != nil {
+				<button type="button" class="drawer-original-link" data-action="open-work" data-workno={ workno }>
+					if detail.OriginalWork.Title != "" {
+						{ detail.OriginalWork.Title }
+					}
+					<span class="mono">{ workno }</span>
+				</button>
+			} else {
+				@DLsiteLink(db.Work{Workno: workno, AgeCategory: detail.AgeCategory}, "drawer-original-link", workno)
+			}
+		</dd>
+	</div>
+	if detail.OriginalWork != nil {
+		if circle := cmp.Or(detail.OriginalWork.CircleName, detail.OriginalWork.CircleID); circle != "" {
+			<div><dt>原作社团</dt><dd>{ circle }</dd></div>
+		}
+	}
+}
+
+templ drawerMetadataEditor(detail *db.WorkDetail) {
+	<div class="drawer-section">
+		<div class="drawer-section-title">手工编辑元数据（离线兜底）</div>
+		<div class="form-row"><label for="meta-title">标题</label><input id="meta-title" value={ detail.Title } style="flex:1"/></div>
+		<div class="form-row"><label for="meta-circle">社团</label><input id="meta-circle" value={ detail.CircleName } style="flex:1"/></div>
+		<div class="form-row"><label for="meta-date">发售日</label><input id="meta-date" value={ detail.ReleaseDate } placeholder="YYYY-MM-DD" style="flex:1"/></div>
+		<div class="form-row">
+			<label for="meta-age">分级</label>
+			<select id="meta-age" aria-label="作品分级">
+				<option value="1" selected?={ detail.AgeCategory == 1 }>全年龄 (GEN)</option>
+				<option value="2" selected?={ detail.AgeCategory == 2 }>R15</option>
+				<option value="3" selected?={ detail.AgeCategory == 3 }>R18</option>
+				<option value="0" selected?={ detail.AgeCategory == 0 }>未分级</option>
+			</select>
+		</div>
+		<div class="form-row"><label for="meta-vas">声优 (逗号分隔)</label><input id="meta-vas" value={ strings.Join(detail.VAs, ", ") } style="flex:1"/></div>
+		<div class="form-row"><label for="meta-tags">DLsite标签</label><input id="meta-tags" value={ drawerTagNames(detail.Tags, "dlsite") } style="flex:1"/></div>
+		<button type="button" class="primary" data-action="save-meta" style="width:100%;">保存元数据</button>
+	</div>
+}
+
+templ drawerPersonalState(detail *db.WorkDetail) {
+	{{
+		review := ""
+		if detail.State != nil {
+			review = detail.State.Review
+		}
+	}}
+	<div class="drawer-section">
+		<div class="drawer-section-title">个人状态与自定义标签</div>
+		<div class="drawer-state-fields">
+			<select id="state-progress" aria-label="个人收听进度">
+				for _, option := range CatalogProgressOptions() {
+					<option value={ option.Value } selected?={ detail.Progress == option.Value }>{ option.Label }</option>
+				}
+			</select>
+			<select id="state-rating" aria-label="个人评分">
+				<option value="0">未评分</option>
+				for rating := 5; rating > 0; rating-- {
+					<option value={ fmt.Sprint(rating) } selected?={ detail.UserRating != nil && *detail.UserRating == rating }>{ strings.Repeat("★", rating) }</option>
+				}
+			</select>
+			<input id="state-review" aria-label="个人短评" value={ review } placeholder="短评备注..."/>
+			<button type="button" data-action="save-state">保存</button>
+		</div>
+		<div class="drawer-tags">
+			for _, tag := range detail.Tags {
+				<button
+					type="button"
+					class={ "tag-pill drawer-tag", templ.KV("user-tag", tag.Source == "user") }
+					data-action="filter-tag"
+					data-val={ tag.Name }
+					title={ tag.Name }
+				>{ tag.Name }</button>
+			}
+		</div>
+		<div class="drawer-tag-fields">
+			<input id="user-tags-input" aria-label="自定义标签" value={ drawerTagNames(detail.Tags, "user") } placeholder="自定义标签（逗号分隔）"/>
+			<button type="button" data-action="save-user-tags">更新标签</button>
+		</div>
+	</div>
+}
+
+templ drawerTrackNodes(nodes []*db.TrackTreeNode, workno string, parentRel string) {
+	for _, node := range nodes {
+		if node.Type == "folder" {
+			<div class="tree-folder">
+				<button
+					type="button"
+					class="tree-folder-label"
+					aria-expanded="true"
+					data-action="toggle-folder"
+					data-folder-key={ workno + ":" + node.RelPath }
+					style="background:transparent;border:0;max-width:100%;text-align:left;"
+				>
+					<span data-folder-chevron>▾</span> 📁 { node.Name }
+					if hlsFolder(node.Children) {
+						<span class="badge badge-format" title="通过 HLS 流播放">HLS</span>
+					}
+				</button>
+				<div class="tree-folder-children">
+					@drawerTrackNodes(node.Children, workno, node.RelPath)
+				</div>
+			</div>
+		} else if node.Track != nil {
+			@drawerTrack(node.Name, node.Track, parentRel)
+		}
+	}
+}
+
+templ drawerTrack(name string, track *db.Track, parentRel string) {
+	<div class="tree-track" title={ track.RelPath }>
+		<div class="tree-track-row">
+			<button type="button" class="tree-track-name" data-action="play-track" data-track-id={ fmt.Sprint(track.ID) } data-folder-rel={ parentRel }>
+				<span data-playing-marker hidden>▶ </span>{ name }
+			</button>
+			<span class="tree-track-meta">
+				if track.HasSubtitle {
+					<span class="badge badge-sfw">字幕</span>
+				}
+				if track.PlayPosition > 0 {
+					{ FormatDuration(track.PlayPosition) } /
+				}
+				{ FormatDuration(trackDuration(track)) }
+			</span>
+			<button type="button" class="icon-button track-add-button" data-action="playlist-add-track" data-track-id={ fmt.Sprint(track.ID) } aria-label="加入播放列表" title="加入播放列表">
+				@Icon("plus")
+			</button>
+		</div>
+		if track.PlayPosition > 0 {
+			<div class="track-progress-bg"><div class="track-progress-fill" style={ "width:" + trackProgressWidth(track) }></div></div>
+		}
+	</div>
+}
+
+templ drawerAttachments(attachments []drawerAttachment) {
+	if len(attachments) > 0 {
+		<div class="drawer-section">
+			<div class="drawer-section-title">特典与文本附件 ({ fmt.Sprint(len(attachments)) })</div>
+			for _, attachment := range attachments[:min(20, len(attachments))] {
+				<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;">
+					<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title={ attachment.RelPath }>[{ attachment.Kind }] { attachment.RelPath }</span>
+					if target := attachment.publicURL(); target != "" {
+						<a href={ templ.URL(target) } target="_blank" rel="noreferrer" style="flex-shrink:0;margin-left:6px;">查看</a>
+					}
+				</div>
+			}
+		</div>
+	}
+}

@@ -148,3 +148,44 @@ func TestSessionAggregationProgressAutoAdvancePrivacyAndVacuum(t *testing.T) {
 		t.Fatalf("VACUUM did not purge deleted history queue_ctx bytes from otoha.db!")
 	}
 }
+
+func TestASMR18SegmentHistoryWaitsForFinalDuration(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	service := NewService(store, config.Default(t.TempDir()))
+	work := &dlsite.Metadata{Workno: "RJ123456", Title: "Work", AgeCategory: dlsite.AgeGeneral}
+	_, err = store.SaveASMR18Work(ctx, work, "page", []db.RemoteTrackInput{{
+		RelPath: "ASMR18/file1.m3u8", StreamURL: "https://cdn3.cloudintech.net/file/RJ123456/1.m3u8",
+		Chapters: []db.Chapter{{Title: "First", Start: 0}, {Title: "Last", Start: 60}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := store.GetWorkDetail(ctx, work.Workno, 1)
+	if err != nil || len(detail.Tracks) != 2 {
+		t.Fatalf("expected two tracks: %+v, %v", detail, err)
+	}
+	first, last := detail.Tracks[0], detail.Tracks[1]
+	heartbeat := HeartbeatRequest{
+		UserID: 1, Workno: work.Workno, TrackID: first.ID, ListenedDelta: 60, NowUnix: 1000,
+		Queue: &QueueSnapshot{TrackIDs: []int64{first.ID, last.ID}},
+	}
+	result, err := service.RecordHeartbeat(ctx, heartbeat)
+	if err != nil || result.Progress != "listening" {
+		t.Fatalf("incomplete duration caused early completion: %+v, %v", result, err)
+	}
+	heartbeat.TrackID, heartbeat.TrackDuration = last.ID, 40
+	heartbeat.ListenedDelta, heartbeat.Position, heartbeat.NowUnix = 30, 30, 1030
+	result, err = service.RecordHeartbeat(ctx, heartbeat)
+	if err != nil || result.Progress != "listened" {
+		t.Fatalf("expected completion once the full duration was known: %+v, %v", result, err)
+	}
+	entries, _, err := service.ListHistory(ctx, 1, "general", 1, 20)
+	if err != nil || len(entries) != 1 || entries[0].TrackID != last.ID || entries[0].TrackName != "Last" || entries[0].Position != 30 {
+		t.Fatalf("history did not retain the segment name and relative offset: %+v, %v", entries, err)
+	}
+}

@@ -3,12 +3,22 @@ package web
 import (
 	"embed"
 	"io/fs"
+	"net/http"
 )
 
-//go:embed all:dist
-var distEmbed embed.FS
+//go:embed src/*.js src/styles.css src/vendor
+var assets embed.FS
 
-// DistFS returns the embedded `web/dist` filesystem for single-binary serving (§2).
-func DistFS() (fs.FS, error) {
-	return fs.Sub(distEmbed, "dist")
+// Assets serves static browser assets from the application binary.
+func Assets() http.Handler {
+	files, err := fs.Sub(assets, "src")
+	if err != nil {
+		panic(err) // The embedded source directory is a build invariant.
+	}
+	// Match files explicitly so the server never exposes directory listings.
+	mux := http.NewServeMux()
+	server := http.StripPrefix("/assets", http.FileServerFS(files))
+	mux.Handle("GET /assets/{file}", server)
+	mux.Handle("GET /assets/vendor/{file}", server)
+	return mux
 }

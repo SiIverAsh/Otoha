@@ -134,6 +134,81 @@ func TestAgeFilteringAndUserTagsPreservation(t *testing.T) {
 	}
 }
 
+func TestWorkSourceURLRoundTrip(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	const workno = "RJ01000001"
+	const sourceURL = "https://www.dlsite.com/home/work/=/product_id/RJ01000001.html"
+	if err := store.SaveMetadata(ctx, &dlsite.Metadata{
+		Workno:    workno,
+		Title:     "Sample work",
+		SourceURL: sourceURL,
+	}, "", true); err != nil {
+		t.Fatalf("SaveMetadata: %v", err)
+	}
+
+	works, total, err := store.ListWorks(ctx, ListWorksOptions{AgeMode: "all"})
+	if err != nil || total != 1 || len(works) != 1 {
+		t.Fatalf("ListWorks: total=%d items=%d err=%v", total, len(works), err)
+	}
+	if works[0].SourceURL != sourceURL {
+		t.Errorf("listed SourceURL = %q, want %q", works[0].SourceURL, sourceURL)
+	}
+	detail, err := store.GetWorkDetail(ctx, workno, 1)
+	if err != nil {
+		t.Fatalf("GetWorkDetail: %v", err)
+	}
+	if detail.SourceURL != sourceURL {
+		t.Errorf("detail SourceURL = %q, want %q", detail.SourceURL, sourceURL)
+	}
+}
+
+func TestWorkDetailAssociatesOriginalPublisher(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := t.Context()
+	original := OriginalWork{Workno: "RJ100001", Title: "原作标题", CircleID: "RG12345", CircleName: "原作社团"}
+	translation := &dlsite.Metadata{
+		Workno: "RJ100002", Title: "译版标题", OriginalWorkno: original.Workno,
+		CircleID: "RG54321", CircleName: "译版社团",
+	}
+	_, _, err = store.SaveMetadataBatch(ctx, []*dlsite.Metadata{
+		{Workno: original.Workno, Title: original.Title, CircleID: original.CircleID, CircleName: original.CircleName},
+		translation,
+		{Workno: "RJ100003", OriginalWorkno: "RJ100099"},
+		{Workno: "RJ100004", OriginalWorkno: "RJ100004"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	translated, err := store.GetWorkDetail(ctx, translation.Workno, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if translated.CircleID != translation.CircleID || translated.CircleName != translation.CircleName {
+		t.Fatalf("translated publisher = %q (%q)", translated.CircleName, translated.CircleID)
+	}
+	if translated.OriginalWork == nil || *translated.OriginalWork != original {
+		t.Fatalf("original = %+v, want %+v", translated.OriginalWork, original)
+	}
+	for _, workno := range []string{original.Workno, "RJ100003", "RJ100004"} {
+		detail, err := store.GetWorkDetail(ctx, workno, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if detail.OriginalWork != nil {
+			t.Errorf("work %s returned unexpected original %+v", workno, detail.OriginalWork)
+		}
+	}
+}
+
 func TestVacuumPhysicallyRemovesDeletedBytes(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "otoha.db")

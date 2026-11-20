@@ -36,10 +36,10 @@ type HeartbeatRequest struct {
 
 // HeartbeatResult returns updated session & auto-advanced progress status.
 type HeartbeatResult struct {
-	Recorded        bool   `json:"recorded"`
-	SessionID       int64  `json:"session_id,omitempty"`
-	Progress        string `json:"progress,omitempty"`
-	AutoAdvanced    bool   `json:"auto_advanced,omitempty"`
+	Recorded     bool   `json:"recorded"`
+	SessionID    int64  `json:"session_id,omitempty"`
+	Progress     string `json:"progress,omitempty"`
+	AutoAdvanced bool   `json:"auto_advanced,omitempty"`
 }
 
 // Service manages session-aggregated listen history, privacy controls, and retention (§9.5 & §9.6).
@@ -229,7 +229,7 @@ func advanceProgressTx(ctx context.Context, tx *sql.Tx, userID int64, workno str
 	}
 
 	// Calculate reference duration from active queue if available (handles SE有り/SE無し parallel versions!)
-	var targetDuration float64
+	var targetDuration sql.NullFloat64
 	if queue != nil && len(queue.TrackIDs) > 0 {
 		ph := make([]string, len(queue.TrackIDs))
 		args := make([]any, len(queue.TrackIDs))
@@ -237,13 +237,36 @@ func advanceProgressTx(ctx context.Context, tx *sql.Tx, userID int64, workno str
 			ph[i] = "?"
 			args[i] = id
 		}
-		_ = tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COALESCE(SUM(duration), 0) FROM track WHERE id IN (%s)`, strings.Join(ph, ",")), args...).Scan(&targetDuration)
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+			SELECT CASE
+				WHEN COUNT(CASE WHEN tr.source_track_id IS NOT NULL AND tr.duration IS NULL
+					AND COALESCE(source.duration, 0) <= tr.start_seconds THEN 1 END) > 0 THEN NULL
+				ELSE COALESCE(SUM(COALESCE(tr.duration, source.duration - tr.start_seconds)), 0)
+			END
+			FROM track tr LEFT JOIN track source ON source.id = tr.source_track_id
+			WHERE tr.id IN (%s)
+		`, strings.Join(ph, ",")), args...).Scan(&targetDuration); err != nil {
+			return prog, false, err
+		}
+		if !targetDuration.Valid {
+			return prog, false, nil
+		}
 	}
-	if targetDuration <= 0 {
-		_ = tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(duration), 0) FROM track WHERE workno = ?`, workno).Scan(&targetDuration)
+	if targetDuration.Float64 <= 0 {
+		if err := tx.QueryRowContext(ctx, `
+			SELECT CASE
+				WHEN COUNT(CASE WHEN tr.source_track_id IS NOT NULL AND tr.duration IS NULL THEN 1 END) > 0 THEN NULL
+				ELSE COALESCE(SUM(tr.duration), 0)
+			END
+			FROM track tr
+			LEFT JOIN track source ON source.id = tr.source_track_id
+			WHERE tr.workno = ? AND COALESCE(source.duration, 0) <= 0
+		`, workno).Scan(&targetDuration); err != nil {
+			return prog, false, err
+		}
 	}
 
-	if targetDuration > 0 && totalListened >= targetDuration*0.85 {
+	if targetDuration.Valid && targetDuration.Float64 > 0 && totalListened >= targetDuration.Float64*0.85 {
 		if _, err := tx.ExecContext(ctx, `UPDATE user_state SET progress = 'listened', updated_at = ? WHERE user_id = ? AND workno = ?`, now, userID, workno); err != nil {
 			return prog, false, err
 		}
@@ -301,7 +324,7 @@ func (s *Service) ListHistory(ctx context.Context, userID int64, ageMode string,
 	q := fmt.Sprintf(`
 		SELECT
 			lh.id, lh.user_id, lh.workno, w.title, COALESCE(w.circle_name, ''), COALESCE(w.age_category, 0),
-			COALESCE(lh.track_id, 0), COALESCE(tr.rel_path, ''), COALESCE(tr.duration, 0),
+			COALESCE(lh.track_id, 0), COALESCE(CASE WHEN tr.source_track_id IS NOT NULL THEN tr.display_title ELSE tr.rel_path END, ''), COALESCE(tr.duration, 0),
 			lh.started_at, lh.last_at, COALESCE(lh.position, 0), COALESCE(lh.listened, 0), COALESCE(lh.queue_ctx, '')
 		FROM listen_history lh
 		JOIN work w ON w.workno = lh.workno
@@ -346,7 +369,7 @@ func (s *Service) ListRecent(ctx context.Context, userID int64, ageMode string, 
 	q := fmt.Sprintf(`
 		SELECT
 			lh.id, lh.user_id, lh.workno, w.title, COALESCE(w.circle_name, ''), COALESCE(w.age_category, 0),
-			COALESCE(lh.track_id, 0), COALESCE(tr.rel_path, ''), COALESCE(tr.duration, 0),
+			COALESCE(lh.track_id, 0), COALESCE(CASE WHEN tr.source_track_id IS NOT NULL THEN tr.display_title ELSE tr.rel_path END, ''), COALESCE(tr.duration, 0),
 			lh.started_at, lh.last_at, COALESCE(lh.position, 0), COALESCE(lh.listened, 0), COALESCE(lh.queue_ctx, '')
 		FROM listen_history lh
 		JOIN (

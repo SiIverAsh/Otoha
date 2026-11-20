@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/SiIverAsh/otoha/internal/db"
 	"github.com/blevesearch/bleve/v2"
@@ -50,28 +51,37 @@ func buildIndexMapping() mapping.IndexMapping {
 }
 
 // Open opens an existing Bleve index at indexPath or creates a new one.
-// If the existing index is corrupted, Engine enters degraded mode rather than crashing startup (§6).
+// If opening fails, Engine enters degraded mode (§6).
 func Open(indexPath string) *Engine {
-	e := &Engine{path: indexPath}
-	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
-		idx, createErr := bleve.New(indexPath, buildIndexMapping())
-		if createErr != nil {
-			e.degraded = true
-			e.lastErr = createErr.Error()
-			return e
+	engine, err := openIndex(indexPath, nil)
+	if err != nil {
+		return &Engine{
+			path:     indexPath,
+			degraded: true,
+			lastErr:  fmt.Sprintf("could not open Bleve index (%v). Using SQL LIKE until `otoha reindex`", err),
 		}
-		e.idx = idx
-		return e
 	}
+	return engine
+}
 
-	idx, openErr := bleve.Open(indexPath)
-	if openErr != nil {
-		e.degraded = true
-		e.lastErr = fmt.Sprintf("bleve index corrupted (%v); degraded to SQL LIKE until `otoha reindex`", openErr)
-		return e
+// OpenWithLockTimeout opens or creates an index for a command that requires it.
+// It returns an error if opening fails or an existing index stays locked.
+func OpenWithLockTimeout(indexPath string, lockTimeout time.Duration) (*Engine, error) {
+	return openIndex(indexPath, map[string]any{"bolt_timeout": lockTimeout.String()})
+}
+
+func openIndex(indexPath string, runtimeConfig map[string]any) (*Engine, error) {
+	var idx bleve.Index
+	var err error
+	if _, statErr := os.Stat(indexPath); os.IsNotExist(statErr) {
+		idx, err = bleve.New(indexPath, buildIndexMapping())
+	} else {
+		idx, err = bleve.OpenUsing(indexPath, runtimeConfig)
 	}
-	e.idx = idx
-	return e
+	if err != nil {
+		return nil, err
+	}
+	return &Engine{path: indexPath, idx: idx}, nil
 }
 
 func (e *Engine) Close() error {
@@ -161,6 +171,12 @@ type SearchResult struct {
 // Search executes Bleve's native query_string query (supporting space-AND, `-exclude`, `"phrase"`, §6).
 // If Bleve is corrupted or errors at query time, it sets Degraded=true so caller uses SQL LIKE fallback.
 func (e *Engine) Search(queryStr string, maxHits int) (*SearchResult, error) {
+	return e.SearchWithinWorks(context.Background(), queryStr, maxHits, nil)
+}
+
+// SearchWithinWorks restricts matches to the given work IDs before applying the hit limit.
+// A nil worknos slice searches the entire index.
+func (e *Engine) SearchWithinWorks(ctx context.Context, queryStr string, maxHits int, worknos []string) (*SearchResult, error) {
 	q := strings.TrimSpace(queryStr)
 	if q == "" {
 		return &SearchResult{Worknos: nil}, nil
@@ -184,9 +200,18 @@ func (e *Engine) Search(queryStr string, maxHits int) (*SearchResult, error) {
 	}
 
 	bq := buildStrictQueryString(q)
+	if worknos != nil {
+		if len(worknos) == 0 {
+			return &SearchResult{Worknos: worknos}, nil
+		}
+		bq = bleve.NewConjunctionQuery(bq, bleve.NewDocIDQuery(worknos))
+	}
 	req := bleve.NewSearchRequestOptions(bq, maxHits, 0, false)
-	res, err := idx.Search(req)
+	res, err := idx.SearchInContext(ctx, req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		e.mu.Lock()
 		e.degraded = true
 		e.lastErr = err.Error()
@@ -198,12 +223,12 @@ func (e *Engine) Search(queryStr string, maxHits int) (*SearchResult, error) {
 		}, nil
 	}
 
-	worknos := make([]string, 0, len(res.Hits))
+	matches := make([]string, 0, len(res.Hits))
 	for _, hit := range res.Hits {
-		worknos = append(worknos, hit.ID)
+		matches = append(matches, hit.ID)
 	}
 	return &SearchResult{
-		Worknos: worknos,
+		Worknos: matches,
 	}, nil
 }
 

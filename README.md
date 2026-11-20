@@ -11,6 +11,7 @@ Open-source, zero-CGO, single-binary self-hosted streaming server for user-owned
 - **原生支持 6 位与 8 位作品号**：精准识别 `RJ` / `BJ` / `VJ` 的 6 位与 8 位作品号（如 `RJ123456`、`RJ01234567`）以及 `RG\d{5}` 社团号、`SRI\d{10}` 系列号，彻底解决旧版 kikoeru 8 位号导入失败与静默截断问题。
 - **完全离线可用 + 四级容错元数据抓取**：
   - 元数据优先走 `product.json`，动态销量/评分用 `info/ajax` 补齐，异常回落至作品页 HTML 解析；对翻译作品自动回溯原作品号与 `ja_jp` 补齐声优列表。
+  - 译版详情按已有原作编号关联作品，并分别显示译版发布社团和已入库原作的社团。
   - 以上三级全部失败或字段残缺时，自动回落至 asmr.one 公开接口（四镜像按序降级）补齐标题、社团、声优与标签；该源可通过 `asmrone_enabled` 关闭，关闭后恢复纯 DLsite 行为。
   - 所有抓取结果落盘缓存，重扫媒体库零重复请求；区分永久 `404` 与网络限流退避重试，支持随时中断与断点续传；同时提供手工编辑元数据与 JSON 备份导入/导出。
   - 支持带用户名密码认证的 `HTTP` / `HTTPS` / `SOCKS5` 代理。
@@ -36,6 +37,9 @@ Open-source, zero-CGO, single-binary self-hosted streaming server for user-owned
 
 ### 1. 编译（零 CGO）
 
+Otoha 使用 Go 和 Templ 渲染页面，由 HTMX 局部更新作品列表、筛选结果和详情面板。
+播放器、字幕、队列以及浏览器本地收藏由内嵌的 JavaScript 模块处理。
+
 Windows PowerShell：
 
 ```powershell
@@ -48,6 +52,10 @@ go build -o otoha.exe .
 ```powershell
 $env:CGO_ENABLED = "0"; $env:GOOS = "linux"; $env:GOARCH = "arm64"; go build -o otoha-linux-arm64 .
 ```
+
+开发时编辑 [`web/views/`](web/views/) 中的 `.templ` 源文件，并运行 `go generate ./web/views` 更新对应的 Go 文件。
+`go build` 和 `go run` 会直接编译生成后的视图，并嵌入 [`web/src/`](web/src/) 下的 JavaScript、CSS 和第三方资源。
+客户端集成继续使用 `/api/` 下的 JSON 和媒体接口。
 
 ### 2. 扫描本地音声目录并启动服务
 
@@ -118,6 +126,14 @@ git push origin v0.1.0
 当前没有 Android APK，手机可通过浏览器访问已部署的 Web 服务。
 
 ---
+
+## ASMR18 采集试用
+
+支持从 `asmr18.fans` 采集作品元数据、HLS 播放源和章节，按 RJ 编号合并作品。
+音声库的「全部音源」下拉菜单可按 ASMR.one 或 ASMR18 筛选列表和搜索结果。
+同时关联两个音源的作品会出现在两个筛选结果中。
+可在“设置与存储”中预览并导入指定作品，或使用 `sync-asmr18` 命令。
+完整字段规则、代理配置和试用命令见 [ASMR18 接入说明](docs/asmr18-sync.md)。
 
 ## 开源许可
 

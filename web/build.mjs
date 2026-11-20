@@ -1,13 +1,12 @@
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const srcDir = path.join(__dirname, "src");
-const distDir = path.join(__dirname, "dist");
+// Keep this entry point for scripts that used the previous frontend build.
+const result = spawnSync("go", ["generate", "./web/views"], {
+  cwd: new URL("../", import.meta.url),
+  stdio: "inherit",
+});
 
-fs.mkdirSync(distDir, { recursive: true });
-for (const file of ["index.html", "styles.css", "app.js"]) {
-  fs.copyFileSync(path.join(srcDir, file), path.join(distDir, file));
+if (result.error) {
+  console.error(`Could not generate Templ views: ${result.error.message}`);
 }
-console.log("Built web/dist successfully.");
+process.exitCode = result.status ?? 1;

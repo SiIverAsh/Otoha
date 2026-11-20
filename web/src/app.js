@@ -1,69 +1,98 @@
+import {
+  closePlaylistPicker,
+  getFavorites,
+  getPlaylist,
+  handleLibraryAction,
+  handleLibraryForm,
+  isFavorite,
+  isLibraryPersistent,
+  refreshLibrary,
+  renderPlaylistPicker,
+  renderPlaylists,
+  setLibraryUser,
+  showPlaylistPicker,
+  syncPlaylistPicker,
+  toggleFavorite,
+} from "./library.js";
+import { closeDropdown, enhanceDropdowns } from "./dropdowns.js";
+
+function readPreference(key, fallback) {
+  try {
+    return localStorage.getItem(`otoha.${key}`) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function savePreference(key, value) {
+  try {
+    localStorage.setItem(`otoha.${key}`, value);
+  } catch {
+    // Keep the preference in this session when browser storage is unavailable.
+  }
+}
+
 const state = {
-  booted: false,
-  authEnabled: false,
-  authenticated: true,
-  user: null,
-  mustResetPassword: false,
-
   tab: "works",
-  viewMode: "table",
-  query: "",
-  ageMode: "general",
-  sortBy: "release_date",
-  sortDesc: true,
-  circle: "",
-  va: "",
-  tag: "",
-  progress: "",
-  subtitleOnly: false,
-  page: 1,
-  pageSize: 40,
-
-  works: [],
-  totalWorks: 0,
-  facets: { circles: [], vas: [], tags: [] },
-  recent: [],
-  historyItems: [],
-  historyTotal: 0,
-  storages: [],
-  users: [],
-  settings: null,
-  asmrCheckpoint: null,
-
-  searchDegraded: false,
-  searchWarning: "",
+  browseQuery: "",
+  theme: readPreference("theme", "dark") === "light" ? "light" : "dark",
+  sidebarCollapsed: readPreference("sidebar", "expanded") === "collapsed",
+  sidebarHidden: readPreference("sidebar-hidden", "false") === "true",
+  playerCollapsed: readPreference("player-collapsed", "false") === "true",
   task: { running: false, phase: "idle", message: "" },
 
   selectedWorkno: "",
   detail: null,
-  editingMeta: false,
   collapsedFolders: {},
 
   player: {
     workno: "",
     workTitle: "",
+    workVas: [],
     track: null,
     queue: [],
     queueIndex: 0,
     folderScope: "",
+    queueOpen: false,
     playing: false,
     currentTime: 0,
     duration: 0,
     playbackRate: 1.0,
     incognito: false,
+    showSubtitles: true,
     cues: [],
     activeSubtitle: "",
+    error: "",
+    sleepMenuOpen: false,
+    sleepDeadline: 0,
   },
   heartbeatIntervalSec: 30,
 };
 
 const audio = new Audio();
+let hlsPlayer = null;
+let pendingSeek = null;
+let playerRequestId = 0;
+let trackStopPromise = null;
+let sleepTimer = null;
+let lastAudibleVolume = audio.volume;
 audio.preload = "metadata";
 
 let lastPlayTickMs = 0;
 let unsentListenedSec = 0;
 let heartbeatTimer = null;
 let sseSource = null;
+let taskNotification = null;
+let drawerMotion = null;
+let drawerClosing = false;
+let drawerRequestId = 0;
+const DRAWER_VISIBLE = { transform: "translateX(0)", opacity: 1 };
+const DRAWER_HIDDEN = { transform: "translateX(100%)", opacity: 0 };
+const DRAWER_ENTER = { duration: 280, easing: "cubic-bezier(0.22, 1, 0.36, 1)" };
+const DRAWER_EXIT = { duration: 340, easing: "cubic-bezier(0.42, 0, 0.28, 1)" };
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+const notificationDuration = 4000;
+const notificationExitDuration = 180;
 
 async function api(path, opts = {}) {
   const headers = Object.assign({}, opts.headers || {});
@@ -88,6 +117,87 @@ function esc(s) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function icon(name) {
+  const symbol = name === "x" ? "close" : name;
+  return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-${esc(symbol)}"></use></svg>`;
+}
+
+function notify(message, { tone = "info", cancelLabel = "" } = {}) {
+  const card = document.createElement("article");
+  card.className = `notification notification--${tone}`;
+  card.innerHTML = `
+    <div class="notification-copy">
+      <p class="notification-message" role="${tone === "error" ? "alert" : "status"}"></p>
+    </div>
+    <button type="button" class="notification-close" aria-label="关闭通知">${icon("close")}</button>
+    ${cancelLabel ? `<div class="notification-actions">
+      <button type="button" class="danger" data-action="cancel-task">${esc(cancelLabel)}</button>
+    </div>` : ""}
+  `;
+  const messageNode = card.querySelector(".notification-message");
+  const closeButton = card.querySelector(".notification-close");
+  let timer;
+  let isHovered = false;
+  let isFocused = false;
+  let isDismissed = false;
+
+  function dismiss() {
+    if (isDismissed) return;
+    isDismissed = true;
+    clearTimeout(timer);
+    if (reducedMotion.matches) {
+      card.remove();
+      return;
+    }
+    card.inert = true;
+    card.classList.add("notification--leaving");
+    setTimeout(() => card.remove(), notificationExitDuration);
+  }
+
+  function scheduleDismissal() {
+    clearTimeout(timer);
+    if (!isDismissed && !isHovered && !isFocused) {
+      timer = setTimeout(dismiss, notificationDuration);
+    }
+  }
+
+  card.addEventListener("pointerenter", (event) => {
+    if (event.pointerType === "touch") return;
+    isHovered = true;
+    scheduleDismissal();
+  });
+  card.addEventListener("pointerleave", (event) => {
+    if (event.pointerType === "touch") return;
+    isHovered = false;
+    scheduleDismissal();
+  });
+  card.addEventListener("focusin", () => {
+    isFocused = true;
+    scheduleDismissal();
+  });
+  card.addEventListener("focusout", (event) => {
+    if (card.contains(event.relatedTarget)) return;
+    isFocused = false;
+    scheduleDismissal();
+  });
+  closeButton.addEventListener("click", dismiss);
+
+  document.getElementById("notifications").prepend(card);
+  messageNode.textContent = message;
+  scheduleDismissal();
+  return {
+    dismiss,
+    updateMessage(nextMessage) {
+      if (!isDismissed && nextMessage !== messageNode.textContent) {
+        messageNode.textContent = nextMessage;
+      }
+    },
+    focus() {
+      closeButton.focus({ preventScroll: true });
+    },
+  };
 }
 
 function fmtSec(sec) {
@@ -119,15 +229,6 @@ function ageBadgeHTML(cat) {
   }
 }
 
-const PROGRESS_LABELS = {
-  "": "未标记",
-  marked: "想听",
-  listening: "在听",
-  listened: "听过",
-  replay: "重听",
-  postponed: "搁置",
-};
-
 function accumulateListened() {
   if (!state.player.playing || !lastPlayTickMs) return;
   const now = performance.now();
@@ -138,6 +239,38 @@ function accumulateListened() {
   }
 }
 
+function getTrackDuration() {
+  const track = state.player.track;
+  const mediaEnd = track?.end_seconds ?? audio.duration;
+  return Number.isFinite(mediaEnd) ? Math.max(0, mediaEnd - (track?.start_seconds ?? 0)) : 0;
+}
+
+function getTrackPosition() {
+  const track = state.player.track;
+  const position = Math.max(0, (pendingSeek ?? audio.currentTime) - (track?.start_seconds ?? 0));
+  return track?.end_seconds == null ? position : Math.min(position, getTrackDuration());
+}
+
+function seekTrack(position) {
+  const { track, duration } = state.player;
+  const trackPosition = track?.start_seconds != null && duration > 0 ? Math.min(position, duration) : position;
+  const mediaPosition = Math.max(0, trackPosition) + (track?.start_seconds ?? 0);
+  if (audio.readyState === 0) {
+    pendingSeek = mediaPosition;
+  } else {
+    pendingSeek = null;
+    audio.currentTime = mediaPosition;
+  }
+}
+
+function resumeTrack() {
+  const { track, duration } = state.player;
+  if (track?.start_seconds != null && duration > 0 && getTrackPosition() >= duration) {
+    seekTrack(0);
+  }
+  return audio.play();
+}
+
 function buildHeartbeatPayload() {
   if (!state.player.workno || !state.player.track) return null;
   accumulateListened();
@@ -146,14 +279,14 @@ function buildHeartbeatPayload() {
   return {
     workno: state.player.workno,
     track_id: state.player.track.id,
-    position: Number((audio.currentTime || 0).toFixed(2)),
+    position: Number(getTrackPosition().toFixed(2)),
     listened_delta: delta,
-    track_duration: isFinite(audio.duration) && audio.duration > 0 ? Number(audio.duration.toFixed(2)) : 0,
+    track_duration: Number(getTrackDuration().toFixed(2)),
     incognito: state.player.incognito,
-    queue: {
+    queue: state.player.folderScope === null ? null : {
       track_ids: state.player.queue.map((t) => t.id),
       current_index: state.player.queueIndex,
-      folder_scope: state.player.folderScope || "",
+      folder_scope: state.player.folderScope,
     },
   };
 }
@@ -169,7 +302,12 @@ async function sendHeartbeat(useBeacon = false) {
     const res = await api("/api/history/heartbeat", { method: "POST", body: payload });
     if (res && res.auto_advanced && state.detail && state.detail.workno === payload.workno) {
       state.detail.progress = res.progress;
-      render();
+      const progress = document.getElementById("state-progress");
+      if (progress && progress.value === progress.querySelector("option[selected]")?.value) {
+        progress.value = res.progress;
+        progress.querySelector("option[selected]")?.removeAttribute("selected");
+        progress.selectedOptions[0]?.setAttribute("selected", "");
+      }
     }
   } catch (_) {}
 }
@@ -185,12 +323,14 @@ function resetHeartbeatTimer() {
 }
 
 audio.addEventListener("play", () => {
+  if (audio.paused) return;
   state.player.playing = true;
   lastPlayTickMs = performance.now();
   renderPlayerOnly();
 });
 
 audio.addEventListener("pause", () => {
+  if (!state.player.playing || !audio.paused) return;
   accumulateListened();
   lastPlayTickMs = 0;
   state.player.playing = false;
@@ -200,36 +340,49 @@ audio.addEventListener("pause", () => {
 
 audio.addEventListener("seeked", () => {
   if (state.player.playing) lastPlayTickMs = performance.now();
-  state.player.currentTime = audio.currentTime || 0;
+  state.player.currentTime = getTrackPosition();
   updateActiveSubtitle();
   sendHeartbeat(false);
-  renderPlayerOnly();
-});
-
-audio.addEventListener("loadedmetadata", () => {
-  state.player.duration = isFinite(audio.duration) ? audio.duration : 0;
-  sendHeartbeat(false);
-  renderPlayerOnly();
-});
-
-audio.addEventListener("timeupdate", () => {
-  state.player.currentTime = audio.currentTime || 0;
-  if (isFinite(audio.duration) && audio.duration > 0) {
-    state.player.duration = audio.duration;
-  }
-  updateActiveSubtitle();
   syncPlayerDOMFast();
 });
 
-audio.addEventListener("ended", async () => {
-  await sendHeartbeat(false);
-  if (state.player.queueIndex + 1 < state.player.queue.length) {
-    playQueueIndex(state.player.queueIndex + 1, 0);
-  } else {
-    state.player.playing = false;
-    renderPlayerOnly();
+audio.addEventListener("loadedmetadata", () => {
+  if (pendingSeek !== null) {
+    audio.currentTime = pendingSeek;
+    pendingSeek = null;
+  }
+  state.player.currentTime = getTrackPosition();
+  state.player.duration = getTrackDuration();
+  sendHeartbeat(false);
+  syncPlayerDOMFast();
+});
+
+audio.addEventListener("timeupdate", async () => {
+  state.player.currentTime = getTrackPosition();
+  const duration = getTrackDuration();
+  if (duration > 0) state.player.duration = duration;
+  updateActiveSubtitle();
+  syncPlayerDOMFast();
+  const end = state.player.track?.end_seconds;
+  if (!audio.paused && pendingSeek === null && end != null && audio.currentTime >= end) {
+    await advanceAfterTrack();
   }
 });
+
+audio.addEventListener("ended", async () => {
+  if (audio.ended) await advanceAfterTrack();
+});
+
+async function advanceAfterTrack() {
+  if (trackStopPromise) return;
+  if (state.player.queueIndex + 1 < state.player.queue.length) {
+    await playQueueIndex(state.player.queueIndex + 1, 0);
+  } else {
+    const stopped = stopCurrentTrack();
+    renderPlayerOnly();
+    await stopped;
+  }
+}
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden" && state.player.track) {
@@ -258,206 +411,462 @@ function updateActiveSubtitle() {
 
 function syncPlayerDOMFast() {
   const seekEl = document.getElementById("player-seek");
-  const timeEl = document.getElementById("player-time");
+  const elapsedEl = document.getElementById("player-elapsed");
+  const durationEl = document.getElementById("player-duration");
   const subEl = document.getElementById("player-sub");
-  if (seekEl && document.activeElement !== seekEl) {
+  if (seekEl && !seekEl.matches(":active")) {
     seekEl.max = String(Math.max(1, Math.floor(state.player.duration || 1)));
     seekEl.value = String(Math.floor(state.player.currentTime || 0));
+    seekEl.style.setProperty("--played", `${100 * Number(seekEl.value) / Number(seekEl.max)}%`);
   }
-  if (timeEl) {
-    timeEl.textContent = `${fmtSec(state.player.currentTime)} / ${fmtSec(state.player.duration)}`;
-  }
+  if (elapsedEl) elapsedEl.textContent = state.player.currentTime ? fmtSec(state.player.currentTime) : "00:00";
+  if (durationEl) durationEl.textContent = fmtSec(state.player.duration);
   if (subEl) {
-    subEl.textContent = state.player.activeSubtitle || "";
+    const text = state.player.error || (state.player.showSubtitles ? state.player.activeSubtitle : "");
+    if (subEl.textContent !== text) subEl.textContent = text;
+    subEl.hidden = !text;
   }
 }
 
-async function loadSubtitles(trackId) {
-  state.player.cues = [];
-  state.player.activeSubtitle = "";
+async function loadSubtitles(trackId, requestId) {
   try {
     const res = await api(`/api/subtitle/${trackId}`);
-    if (res && res.found && Array.isArray(res.cues)) {
+    if (requestId === playerRequestId && res?.found && Array.isArray(res.cues)) {
       state.player.cues = res.cues;
       updateActiveSubtitle();
+      syncPlayerDOMFast();
     }
   } catch (_) {}
-  renderPlayerOnly();
 }
 
-async function playQueueIndex(idx, resumeSec = null) {
-  if (idx < 0 || idx >= state.player.queue.length) return;
-  if (state.player.track) {
-    await sendHeartbeat(false);
-  }
-  const tr = state.player.queue[idx];
-  state.player.queueIndex = idx;
-  state.player.track = tr;
-  state.player.duration = tr.duration || 0;
-  audio.src = `/api/stream/${tr.id}`;
-  audio.playbackRate = state.player.playbackRate || 1.0;
+function stopCurrentTrack() {
+  if (trackStopPromise) return trackStopPromise;
+  const heartbeat = sendHeartbeat(false);
+  state.player.playing = false;
+  lastPlayTickMs = 0;
+  audio.pause();
+  trackStopPromise = heartbeat.finally(() => {
+    trackStopPromise = null;
+  });
+  return trackStopPromise;
+}
 
-  const startAt = resumeSec !== null ? resumeSec : tr.play_position || 0;
-  audio.currentTime = startAt > 0 ? startAt : 0;
-  state.player.currentTime = audio.currentTime;
-  loadSubtitles(tr.id);
+function clearPlaybackSource() {
+  if (hlsPlayer) {
+    hlsPlayer.destroy();
+    hlsPlayer = null;
+  }
+  audio.removeAttribute("src");
+  audio.load();
+}
+
+function isHLSStream(track) {
+  return track.streamIsHLS === true || /\.m3u8(?:$|[?#])/i.test(track.stream_url || "");
+}
+
+async function resetPlayer() {
+  ++playerRequestId;
+  await stopCurrentTrack();
+  clearPlaybackSource();
+  pendingSeek = null;
+  setSleepTimer(0);
+  Object.assign(state.player, {
+    workno: "",
+    workTitle: "",
+    workVas: [],
+    track: null,
+    queue: [],
+    queueIndex: 0,
+    folderScope: "",
+    queueOpen: false,
+    currentTime: 0,
+    duration: 0,
+    incognito: false,
+    cues: [],
+    activeSubtitle: "",
+    error: "",
+  });
+}
+
+async function playQueueIndex(idx, resumeSec = null, nextQueue = null) {
+  const p = state.player;
+  const tracks = nextQueue?.tracks ?? p.queue;
+  const tr = tracks[idx];
+  if (!tr) return;
+  const requestId = ++playerRequestId;
+  await stopCurrentTrack();
+  if (requestId !== playerRequestId) return;
+
+  clearPlaybackSource();
+  const duration = tr.duration ?? 0;
+  let startAt = Math.max(0, resumeSec ?? tr.play_position ?? 0);
+  if (tr.start_seconds != null && duration > 0 && startAt >= duration) startAt = 0;
+  Object.assign(p, {
+    workno: tr.workno,
+    workTitle: tr.workTitle,
+    workVas: tr.workVas,
+    queue: tracks,
+    queueIndex: idx,
+    track: tr,
+    currentTime: startAt,
+    duration,
+    error: "",
+    cues: [],
+    activeSubtitle: "",
+  });
+  if (nextQueue) p.folderScope = nextQueue.folderScope;
+  const mediaStart = startAt + (tr.start_seconds ?? 0);
+  pendingSeek = mediaStart > 0 ? mediaStart : null;
+  const streamURL = `/api/stream/${tr.id}`;
+  if (isHLSStream(tr) && !audio.canPlayType("application/vnd.apple.mpegurl")) {
+    if (!window.Hls?.isSupported()) {
+      p.error = "当前浏览器不支持 HLS 播放";
+      render();
+      return;
+    }
+    hlsPlayer = new window.Hls();
+    hlsPlayer.loadSource(streamURL);
+    hlsPlayer.attachMedia(audio);
+    hlsPlayer.on(window.Hls.Events.ERROR, (_event, data) => {
+      if (data.fatal && requestId === playerRequestId) {
+        audio.pause();
+        p.error = "播放源加载失败，请检查代理设置或重新采集该作品";
+        renderPlayerOnly();
+      }
+    });
+  } else {
+    audio.src = streamURL;
+  }
+  audio.playbackRate = p.playbackRate;
+  loadSubtitles(tr.id, requestId);
+  render();
+
   try {
     await audio.play();
-  } catch (_) {}
-  render();
+  } catch (err) {
+    if (requestId !== playerRequestId || err.name === "AbortError" || err.name === "NotAllowedError" || p.error) return;
+    p.error = "音轨加载失败，请重试";
+    renderPlayerOnly();
+  }
 }
 
-async function bootstrap() {
-  const me = await api("/api/auth/me");
-  state.authEnabled = !!me.auth_enabled;
-  state.authenticated = !!me.authenticated;
-  state.user = me.user;
-  state.ageMode = me.default_hide_nsfw ? "general" : "all";
-  state.heartbeatIntervalSec = me.heartbeat_interval_sec || 30;
-  state.searchDegraded = !!me.search_degraded;
-  state.searchWarning = me.search_warning || "";
-  resetHeartbeatTimer();
+async function playSavedQueue(tracks, index) {
+  // The history API restores queues scoped to one work.
+  await playQueueIndex(index, 0, { tracks, folderScope: null });
+}
 
-  if (state.authenticated) {
-    connectTaskSSE();
-    await Promise.all([loadWorks(), loadFacets(), loadRecent()]);
+function startApp() {
+  applyTheme();
+  const layout = document.querySelector(".layout");
+  if (!layout) return;
+  setLibraryUser({ id: Number(layout.dataset.userId) });
+  state.heartbeatIntervalSec = Number(layout.dataset.heartbeatInterval);
+  resetHeartbeatTimer();
+  syncPage();
+  connectTaskSSE();
+
+  // Older versions stored the view preference only in localStorage.
+  if (!document.cookie.split("; ").some((cookie) => cookie.startsWith("otoha_view="))) {
+    const view = readPreference("view", "grid");
+    if (view === "table") {
+      document.cookie = "otoha_view=table; Path=/; Max-Age=31536000; SameSite=Lax";
+      if (state.tab === "works" && !new URL(location.href).searchParams.has("view")) {
+        refreshPage().catch(reportRequestError);
+      }
+    }
   }
-  state.booted = true;
-  render();
 }
 
 function connectTaskSSE() {
   if (sseSource) sseSource.close();
   sseSource = new EventSource("/api/tasks/events");
+  let isInitial = true;
   sseSource.onmessage = (ev) => {
     try {
       const snap = JSON.parse(ev.data);
-      const wasRunning = state.task.running;
+      const previous = state.task;
       state.task = snap;
-      if (snap.asmr_sync) {
-        state.asmrCheckpoint = snap.asmr_sync;
+      updateTaskNotification(snap, previous, isInitial);
+      isInitial = false;
+      syncTaskIndicator();
+      if (state.tab === "settings" &&
+          (JSON.stringify(snap.asmr_sync) !== JSON.stringify(previous.asmr_sync) ||
+           JSON.stringify(snap.asmr18_preview) !== JSON.stringify(previous.asmr18_preview))) {
+        window.htmx.ajax("GET", "/ui/settings/task", {
+          source: "#asmrone-checkpoint",
+          target: "#asmrone-checkpoint",
+          swap: "innerHTML",
+        }).catch((error) => { if (error) reportRequestError(error); });
       }
-      if (wasRunning && !snap.running) {
-        loadWorks();
-        loadFacets();
-      } else {
-        render();
+      if (previous.running && !snap.running && state.tab === "works") {
+        refreshPage().catch(reportRequestError);
       }
     } catch (_) {}
   };
 }
 
-async function loadWorks() {
-  const params = new URLSearchParams({
-    page: String(state.page),
-    page_size: String(state.pageSize),
-    age: state.ageMode,
-    sort_by: state.sortBy,
-    sort_desc: state.sortDesc ? "1" : "0",
+function showTaskNotification(snapshot) {
+  taskNotification?.dismiss();
+  const tone = snapshot.phase === "error" ? "error" : snapshot.phase === "done" ? "success" : "info";
+  const cancelLabel = snapshot.running
+    ? (snapshot.phase === "syncing_asmrone" ? "暂停并保存断点" : "中断任务")
+    : "";
+  taskNotification = notify(snapshot.message, { tone, cancelLabel });
+}
+
+function updateTaskNotification(snapshot, previous, isInitial) {
+  const sameTask = snapshot.started_at === previous.started_at;
+  if (snapshot.running) {
+    if (previous.running && sameTask) {
+      taskNotification?.updateMessage(snapshot.message);
+    } else {
+      showTaskNotification(snapshot);
+    }
+    return;
+  }
+
+  const isTerminal = ["done", "cancelled", "error"].includes(snapshot.phase);
+  const isNewStatus = previous.running || !sameTask ||
+    snapshot.phase !== previous.phase || snapshot.message !== previous.message;
+  const shouldAnnounce = !isInitial || previous.running || snapshot.phase === "error";
+  if (isTerminal && isNewStatus && shouldAnnounce) {
+    showTaskNotification(snapshot);
+  }
+}
+
+function reportRequestError(error) {
+  notify(error?.message || "请求未完成", { tone: "error" });
+}
+
+function currentPageURL() {
+  return location.pathname + location.search;
+}
+
+async function requestPage(url, { navigate = false, keepDrawer = false } = {}) {
+  await window.htmx.ajax("GET", url, {
+    source: "#page-content",
+    target: "#page-content",
+    swap: "innerHTML",
+    headers: {
+      "X-Otoha-Navigate": navigate ? "1" : "0",
+      "X-Otoha-Keep-Drawer": keepDrawer ? "1" : "0",
+    },
+  }).catch((error) => {
+    if (error) throw error;
+    // HTMX rejects without a value when a newer navigation aborts the request.
   });
-  if (state.circle) params.set("circle", state.circle);
-  if (state.va) params.set("va", state.va);
-  if (state.tag) params.set("tag", state.tag);
-  if (state.progress) params.set("progress", state.progress);
-  if (state.subtitleOnly) params.set("subtitle_only", "1");
-
-  let data;
-  if (state.query.trim()) {
-    params.set("q", state.query.trim());
-    data = await api(`/api/search?${params.toString()}`);
-    state.searchDegraded = !!data.degraded;
-    state.searchWarning = data.warning || "";
-  } else {
-    data = await api(`/api/works?${params.toString()}`);
-  }
-  state.works = data.items || [];
-  state.totalWorks = data.total || 0;
-  render();
 }
 
-async function loadFacets() {
-  const data = await api(`/api/works/facets?age=${encodeURIComponent(state.ageMode)}`);
-  state.facets = {
-    circles: data.circles || [],
-    vas: data.vas || [],
-    tags: data.tags || [],
+function refreshPage() {
+  return requestPage(currentPageURL());
+}
+
+function refreshWorks() {
+  if (state.tab === "works") return refreshPage();
+}
+
+let swappedDrawerRequest = 0;
+let drawerResponseStatus;
+
+async function openWorkDrawer(workno, { edit = false, preserveInput = false } = {}) {
+  const requestId = ++drawerRequestId;
+  drawerResponseStatus = undefined;
+  const url = `/ui/works/${encodeURIComponent(workno)}${edit ? "?edit=1" : ""}`;
+  await window.htmx.ajax("GET", url, {
+    source: "#drawer-region",
+    target: "#drawer-region",
+    swap: "innerHTML",
+    headers: {
+      "X-Otoha-Drawer": String(requestId),
+      "X-Otoha-Preserve-Input": preserveInput ? "1" : "0",
+    },
+  }).catch((error) => {
+    if (requestId === drawerRequestId) throw error ?? new Error("无法连接到作品详情");
+  });
+  if (requestId !== drawerRequestId) return null;
+  if (swappedDrawerRequest !== requestId) {
+    const error = new Error("无法打开作品详情");
+    error.status = drawerResponseStatus;
+    throw error;
+  }
+  return state.detail;
+}
+
+function isCurrentWorkDrawer(workno, requestId) {
+  return !drawerClosing && drawerRequestId === requestId && state.detail?.workno === workno;
+}
+
+function finishClosingDrawer() {
+  drawerClosing = false;
+  state.selectedWorkno = "";
+  state.detail = null;
+  document.querySelector(".drawer")?.remove();
+  document.querySelector(".work-card.selected, .works-table tr.selected")?.classList.remove("selected");
+}
+
+function closeWorkDrawer() {
+  ++drawerRequestId;
+  if (!state.detail || drawerClosing) return;
+  const drawer = document.querySelector(".drawer");
+  if (!drawer || reducedMotion.matches) {
+    cancelDrawerMotion();
+    finishClosingDrawer();
+    return;
+  }
+  const from = drawerMotion ? readDrawerPose(drawer) : DRAWER_VISIBLE;
+  drawerClosing = true;
+  startDrawerMotion(drawer, from);
+}
+
+function readDrawerPose(drawer) {
+  const style = getComputedStyle(drawer);
+  return { transform: style.transform, opacity: style.opacity };
+}
+
+function cancelDrawerMotion() {
+  drawerMotion?.animation.cancel();
+  drawerMotion = null;
+}
+
+function startDrawerMotion(drawer, from, elapsed = 0) {
+  cancelDrawerMotion();
+  const closing = drawerClosing;
+  drawer.inert = closing;
+  const to = closing ? DRAWER_HIDDEN : DRAWER_VISIBLE;
+  const timing = closing ? DRAWER_EXIT : DRAWER_ENTER;
+  const animation = drawer.animate([from, to], { ...timing, fill: "both" });
+  animation.currentTime = elapsed;
+  drawerMotion = { animation, from, closing };
+  animation.finished.then(() => {
+    if (drawerMotion?.animation !== animation) return;
+    cancelDrawerMotion();
+    if (closing) finishClosingDrawer();
+  }, () => {}); // Replaced renders cancel the old animation after saving its time.
+}
+
+function captureDrawerState(drawer) {
+  if (!drawer) return null;
+  return {
+    workno: drawer.dataset.workno,
+    scrollTop: drawer.scrollTop,
+    motion: drawerMotion && {
+      from: drawerMotion.from,
+      elapsed: drawerMotion.animation.currentTime ?? 0,
+      interruptedPose: drawerMotion.closing !== drawerClosing ? readDrawerPose(drawer) : null,
+    },
   };
-  render();
 }
 
-async function loadRecent() {
-  const data = await api(`/api/history/recent?age=${encodeURIComponent(state.ageMode)}&limit=8`);
-  state.recent = data.items || [];
-  render();
-}
-
-async function loadHistoryTab() {
-  const data = await api(`/api/history?age=${encodeURIComponent(state.ageMode)}&page=1&page_size=80`);
-  state.historyItems = data.items || [];
-  state.historyTotal = data.total || 0;
-  render();
-}
-
-async function loadSettingsTab() {
-  const [settings, storages, asmrSt] = await Promise.all([
-    api("/api/settings"),
-    api("/api/storages"),
-    api("/api/asmrone/status").catch(() => ({ checkpoint: null })),
-  ]);
-  state.settings = settings;
-  state.storages = storages.items || [];
-  state.asmrCheckpoint = asmrSt.checkpoint || state.asmrCheckpoint;
-  if (state.user && state.user.is_admin) {
-    const u = await api("/api/users").catch(() => ({ items: [] }));
-    state.users = u.items || [];
+function syncDrawerMotion(previous) {
+  const drawer = document.querySelector(".drawer");
+  if (!drawer) return;
+  if (previous?.workno === drawer.dataset.workno) {
+    drawer.scrollTop = previous.scrollTop;
   }
-  render();
+  if (reducedMotion.matches) {
+    if (drawerClosing) finishClosingDrawer();
+    return;
+  }
+  if (previous?.motion) {
+    const { from, elapsed, interruptedPose } = previous.motion;
+    if (interruptedPose) startDrawerMotion(drawer, interruptedPose);
+    else startDrawerMotion(drawer, from, elapsed);
+  } else if (!previous) {
+    startDrawerMotion(drawer, DRAWER_HIDDEN);
+  }
 }
 
-async function openWorkDrawer(workno) {
-  state.selectedWorkno = workno;
-  state.editingMeta = false;
-  state.detail = await api(`/api/works/${encodeURIComponent(workno)}`);
-  render();
-}
+reducedMotion.addEventListener("change", () => {
+  if (reducedMotion.matches) drawerMotion?.animation.finish();
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.defaultPrevented || e.isComposing) return;
+  if (e.key === "Escape") {
+    if (closePlaylistPicker()) {
+      e.preventDefault();
+      render();
+      return;
+    }
+    if (closeDropdown(true)) {
+      e.preventDefault();
+      return;
+    }
+    if (closePlayerOverlay()) {
+      e.preventDefault();
+      return;
+    }
+    if (state.detail) {
+      e.preventDefault();
+      closeWorkDrawer();
+    }
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+    const search = document.getElementById("search-input");
+    if (search) {
+      e.preventDefault();
+      search.focus();
+    }
+  }
+});
 
 async function resumeFromHistory(entry) {
-  const det = await api(`/api/works/${encodeURIComponent(entry.workno)}`);
-  state.selectedWorkno = det.workno;
-  state.detail = det;
+  const det = await openWorkDrawer(entry.workno);
+  if (!det) return;
 
-  const trackById = new Map((det.tracks || []).map((t) => [t.id, t]));
+  const tracks = det.tracks || [];
+  const trackById = new Map(tracks.map((track) => [track.id, track]));
+  const segmentsBySource = new Map();
+  for (const track of tracks) {
+    if (track.source_track_id == null) continue;
+    if (!segmentsBySource.has(track.source_track_id)) segmentsBySource.set(track.source_track_id, []);
+    segmentsBySource.get(track.source_track_id).push(track);
+  }
+  const legacySegment = segmentsBySource.get(entry.track_id)?.find((track) =>
+    entry.position >= track.start_seconds && (track.end_seconds == null || entry.position < track.end_seconds));
+  const trackId = legacySegment?.id ?? entry.track_id;
+  const resumePosition = entry.position - (legacySegment?.start_seconds ?? 0);
   let queue = [];
-  let idx = 0;
   let folderScope = "";
 
   if (entry.queue_ctx) {
     try {
       const parsed = JSON.parse(entry.queue_ctx);
       if (Array.isArray(parsed.track_ids) && parsed.track_ids.length > 0) {
-        queue = parsed.track_ids.map((id) => trackById.get(id)).filter(Boolean);
-        idx = Math.min(Math.max(0, parsed.current_index || 0), Math.max(0, queue.length - 1));
+        queue = parsed.track_ids.flatMap((id) => {
+          const track = trackById.get(id);
+          return track ? [track] : segmentsBySource.get(id) ?? [];
+        });
         folderScope = parsed.folder_scope || "";
       }
     } catch (_) {}
   }
-  if (queue.length === 0 && det.tracks && det.tracks.length > 0) {
-    queue = det.tracks;
-    const foundIdx = queue.findIndex((t) => t.id === entry.track_id);
-    idx = foundIdx >= 0 ? foundIdx : 0;
+  let idx = queue.findIndex((track) => track.id === trackId);
+  if (idx < 0) {
+    queue = tracks;
+    folderScope = "";
+    idx = queue.findIndex((track) => track.id === trackId);
   }
   if (queue.length > 0) {
-    state.player.workno = det.workno;
-    state.player.workTitle = det.title;
-    state.player.queue = queue;
-    state.player.folderScope = folderScope;
-    await playQueueIndex(idx, entry.position || 0);
+    await playQueueIndex(Math.max(0, idx), idx < 0 ? 0 : resumePosition, {
+      tracks: withWorkContext(queue, det),
+      folderScope,
+    });
   } else {
     render();
   }
 }
 
-function startPlayFromTree(trackId, parentFolderRel) {
+function withWorkContext(tracks, work) {
+  return tracks.map((track) => ({
+    ...track,
+    workno: work.workno,
+    workTitle: work.title,
+    workVas: work.vas || [],
+  }));
+}
+
+async function startPlayFromTree(trackId, parentFolderRel) {
   if (!state.detail || !state.detail.tracks) return;
   const all = state.detail.tracks;
   const scoped = all.filter((t) => {
@@ -467,862 +876,873 @@ function startPlayFromTree(trackId, parentFolderRel) {
     return dir === parentFolderRel;
   });
   const queue = scoped.length > 0 ? scoped : all;
-  const idx = Math.max(0, queue.findIndex((t) => t.id === trackId));
-  state.player.workno = state.detail.workno;
-  state.player.workTitle = state.detail.title;
-  state.player.queue = queue;
-  state.player.folderScope = parentFolderRel;
-  playQueueIndex(idx, queue[idx].play_position > 2 ? queue[idx].play_position : 0);
+  const idx = queue.findIndex((t) => t.id === trackId);
+  if (idx < 0) return;
+  await playQueueIndex(idx, queue[idx].play_position > 2 ? queue[idx].play_position : 0, {
+    tracks: withWorkContext(queue, state.detail),
+    folderScope: parentFolderRel,
+  });
 }
 
-function renderTreeNodes(nodes, parentRel = "") {
-  if (!nodes || nodes.length === 0) return "";
-  return nodes
-    .map((n) => {
-      if (n.type === "folder") {
-        const key = `${state.detail.workno}:${n.rel_path}`;
-        const collapsed = !!state.collapsedFolders[key];
-        return `
-          <div class="tree-folder">
-            <div class="tree-folder-label" data-action="toggle-folder" data-folder-key="${esc(key)}">
-              ${collapsed ? "▸" : "▾"} 📁 ${esc(n.name)}
-            </div>
-            ${collapsed ? "" : renderTreeNodes(n.children || [], n.rel_path)}
-          </div>
-        `;
-      }
-      const tr = n.track;
-      const isPlaying = state.player.track && state.player.track.id === tr.id;
-      const dur = tr.duration || 0;
-      const pos = tr.play_position || 0;
-      const pct = dur > 0 ? Math.min(100, Math.round((pos / dur) * 100)) : 0;
-      return `
-        <div class="tree-track ${isPlaying ? "playing" : ""}" data-action="play-track" data-track-id="${tr.id}" data-folder-rel="${esc(parentRel)}" title="${esc(tr.rel_path)}">
-          <div class="tree-track-row">
-            <span class="tree-track-name">${isPlaying ? "▶ " : ""}${esc(n.name)}</span>
-            <span class="tree-track-meta">
-              ${tr.has_subtitle ? `<span class="badge badge-sfw">字幕</span>` : ""}
-              ${pos > 0 ? `${fmtSec(pos)} / ` : ""}${fmtSec(dur)}
-            </span>
-          </div>
-          ${
-            pos > 0
-              ? `<div class="track-progress-bg"><div class="track-progress-fill" style="width:${pct}%"></div></div>`
-              : ""
-          }
-        </div>
-      `;
-    })
-    .join("");
-}
-
-function parseSafeJSON(raw, fallback) {
-  if (!raw) return fallback;
-  try {
-    return JSON.parse(raw);
-  } catch (_) {
-    return fallback;
-  }
-}
-
-function renderDrawer() {
-  const d = state.detail;
-  if (!d) return "";
-  const userTags = (d.tags || []).filter((t) => t.source === "user").map((t) => t.name);
-  const dlsiteTags = (d.tags || []).filter((t) => t.source !== "user");
-  const langEditions = parseSafeJSON(d.language_editions_json, []);
-  const ranks = parseSafeJSON(d.rank_json, []);
-  const remoteAttachments = parseSafeJSON(d.remote_files_json, []);
-  const bestRank = Array.isArray(ranks) && ranks.length > 0 ? Math.min(...ranks.map((r) => r.rank || 9999)) : 0;
-
+function renderPageHeading(title, count = null, actions = "") {
   return `
-    <aside class="drawer">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <span class="mono">
-          ${esc(d.workno)} ${ageBadgeHTML(d.age_category)}
-          ${d.has_subtitle ? `<span class="badge badge-sfw">含字幕</span>` : ""}
-        </span>
-        <div style="display:flex;gap:4px;">
-          <button data-action="sync-work-tracks" title="从 asmr.one 同步远端音轨树与字幕">同步音轨</button>
-          <button data-action="toggle-edit-meta">${state.editingMeta ? "取消编辑" : "编辑"}</button>
-          <button data-action="scrape-work" title="刷新该作品元数据">刷新</button>
-          <button data-action="close-drawer">✕</button>
-        </div>
+    <div class="page-heading">
+      <div><h1>${title}</h1>${count === null ? "" : `<span class="page-count">${count.toLocaleString("zh-CN")} 部作品</span>`}</div>
+      ${actions ? `<div class="page-actions">${actions}</div>` : ""}
+    </div>`;
+}
+
+function renderEmptyState(glyph, title, hint, action = "") {
+  return `<div class="empty-state">${icon(glyph)}<h2>${title}</h2><p>${hint}</p>${action}</div>`;
+}
+
+function renderFavoriteButton(workno, className = "icon-button") {
+  const saved = isFavorite(workno);
+  const label = saved ? "取消收藏" : "收藏作品";
+  return `<button class="${className}${saved ? " active" : ""}" data-action="toggle-favorite"
+    data-workno="${esc(workno)}" aria-label="${label}" aria-pressed="${saved}" title="${label}">${icon("heart")}</button>`;
+}
+
+const DLSITE_ORIGIN = "https://www.dlsite.com";
+const DLSITE_WORKNO = /^[RBV]J(?:\d{6}|\d{8})$/;
+const DLSITE_PRODUCT_PATH = /^\/[a-z][a-z-]*\/work\/(?:=|%3d)\/product_id\/([RBV]J(?:\d{6}|\d{8}))(?:\.html)?\/?$/i;
+
+function dlsiteWorkURL(work) {
+  const candidates = [work.workno, work.original_workno]
+    .filter((value) => typeof value === "string")
+    .map((value) => value.trim().toUpperCase());
+  const workno = candidates.find((value) => DLSITE_WORKNO.test(value));
+  if (typeof work.source_url === "string" && URL.canParse(work.source_url)) {
+    const source = new URL(work.source_url);
+    const product = source.pathname.match(DLSITE_PRODUCT_PATH)?.[1].toUpperCase();
+    if (source.protocol === "https:" && !source.username && !source.password && !source.port &&
+        (source.hostname === "www.dlsite.com" || source.hostname === "dlsite.com") &&
+        product && (!workno || product === workno)) return source.href;
+  }
+
+  if (workno) {
+    const general = work.age_category === 1;
+    const sectionByPrefix = { RJ: general ? "home" : "maniax", BJ: "books", VJ: general ? "soft" : "pro" };
+    return `${DLSITE_ORIGIN}/${sectionByPrefix[workno.slice(0, 2)]}/work/=/product_id/${workno}.html`;
+  }
+  const title = typeof work.title === "string" ? work.title.trim() : "";
+  const keyword = title || candidates.find(Boolean);
+  return keyword ? `${DLSITE_ORIGIN}/home/fsr/=/keyword/${encodeURIComponent(keyword)}` : DLSITE_ORIGIN;
+}
+
+function renderDLsiteLink(work, className, text = "") {
+  const label = `在 DLsite 查看 ${work.title || work.workno || "作品"}`;
+  return `<a class="dlsite-link ${className}" href="${esc(dlsiteWorkURL(work))}" target="_blank"
+    rel="noopener noreferrer" aria-label="${esc(label)}" title="${esc(label)}">${text ? `<span>${esc(text)}</span>` : ""}${icon("external")}</a>`;
+}
+
+function renderWorkGrid(works) {
+  return `<div class="card-grid">
+    ${works.map((work) => {
+      const workno = esc(work.workno);
+      const creators = [...new Set([work.circle_name, ...(work.vas || [])].filter(Boolean))].join(" · ");
+      const tags = (work.tags || []).slice(0, 2);
+      return `<article class="work-card${state.selectedWorkno === work.workno ? " selected" : ""}">
+        <button class="work-card-open" data-action="open-work" data-workno="${workno}" aria-label="查看 ${esc(work.title)}">
+          <span class="work-cover">
+            ${icon("headphones")}
+            <img src="/api/cover/${encodeURIComponent(work.workno)}" loading="lazy" decoding="async" alt="" />
+            <span class="cover-overlay"><span class="cover-play">${icon("chevron-right")}</span></span>
+          </span>
+          <span class="work-card-body">
+            <span class="work-card-kicker"><span class="mono">${workno}</span>${ageBadgeHTML(work.age_category)}
+              ${work.has_subtitle ? `<span class="badge badge-sfw">字幕</span>` : ""}
+            </span>
+            <span class="work-card-title" title="${esc(work.title)}">${esc(work.title)}</span>
+            ${creators ? `<span class="work-card-meta" title="${esc(creators)}">${esc(creators)}</span>` : ""}
+            ${tags.length ? `<span class="work-card-tags">${tags.map((tag) => `<span class="tag-pill">${esc(tag.name)}</span>`).join("")}</span>` : ""}
+          </span>
+        </button>
+        ${renderFavoriteButton(work.workno, "icon-button card-favorite")}
+        ${renderDLsiteLink(work, "card-dlsite")}
+      </article>`;
+    }).join("")}
+  </div>`;
+}
+
+function renderFavoritesTab() {
+  const favorites = getFavorites();
+  return `${renderPageHeading("我的收藏", favorites.length)}
+    ${favorites.length
+      ? renderWorkGrid(favorites)
+      : renderEmptyState("heart", "还没有收藏", "点击作品卡片或播放器上的心形图标即可收藏。",
+          '<a class="primary button-link" href="/" hx-boost="true" hx-target="#page-content" hx-swap="innerHTML">浏览作品</a>')}`;
+}
+
+function renderPlayerButton(action, glyph, label, attrs = "", className = "") {
+  return `<button type="button" class="icon-button ${className}" data-action="${action}" aria-label="${label}" title="${label}" ${attrs}>${icon(glyph)}</button>`;
+}
+
+function renderQueueDrawer() {
+  const p = state.player;
+  const chapters = p.track?.chapters || [];
+  const visibility = `aria-hidden="${!p.queueOpen}"${p.queueOpen ? "" : " inert"}`;
+  return `
+    <button type="button" id="queue-scrim" class="queue-scrim" tabindex="-1" aria-label="关闭播放队列"
+      data-action="toggle-queue" data-overlay="scrim" ${visibility}></button>
+    <aside class="queue-drawer" id="player-queue" aria-labelledby="queue-title" ${visibility}>
+      <header class="queue-header">
+        <div><h2 id="queue-title">播放队列</h2><span>${p.queue.length} 首音轨</span></div>
+        ${renderPlayerButton("toggle-queue", "close", "关闭队列", 'id="queue-close"')}
+      </header>
+      <div class="queue-items">
+        ${p.queue.length ? p.queue.map((track, index) => `
+          <button type="button" class="queue-track ${index === p.queueIndex ? "active" : ""}" data-action="player-queue-track" data-index="${index}" ${index === p.queueIndex ? 'aria-current="true"' : ""}>
+            <span class="queue-track-index">${index === p.queueIndex && p.playing ? icon("play") : index + 1}</span>
+            <span class="queue-track-meta">
+              <strong>${esc(track.title || track.rel_path)}</strong>
+              <span>${esc(track.workTitle)}</span>
+            </span>
+            <span class="queue-duration">${fmtSec(track.duration)}</span>
+          </button>
+        `).join("") : '<p class="queue-empty">队列为空</p>'}
       </div>
-
-      <div class="drawer-header">
-        <img class="drawer-cover" src="/api/cover/${esc(d.workno)}" alt="${esc(d.workno)}" />
-        <div style="min-width:0;flex:1;">
-          <div class="drawer-title" title="${esc(d.title)}">${esc(d.title)}</div>
-          <div style="color:var(--muted);margin-bottom:3px;">
-            ${d.circle_name ? `社团：<a href="#" data-action="filter-circle" data-val="${esc(d.circle_name)}" style="color:#93c5fd;">${esc(d.circle_name)}</a>` : ""}
-            ${d.release_date ? ` · ${esc(d.release_date)}` : ""}
-          </div>
-          <div style="color:var(--muted);">
-            ${(d.vas || []).length ? `CV：${d.vas.map((v) => `<a href="#" data-action="filter-va" data-val="${esc(v)}" style="color:#cbd5e1;margin-right:6px;">${esc(v)}</a>`).join("")}` : "CV：-"}
-          </div>
-          <div style="color:var(--muted);font-size:11px;margin-top:2px;" title="剧本: ${(d.scenarios || []).join(", ") || "-"} | 插画: ${(d.illusts || []).join(", ") || "-"} | 音乐: ${(d.musics || []).join(", ") || "-"}">
-            评分 ${d.rating ? d.rating.toFixed(2) : "-"} (${d.rate_count || 0}) · 销量 ${d.dl_count || 0} · ¥${d.price || 0}
-            ${d.duration ? ` · 时长 ${fmtSec(d.duration)}` : ""}
-            ${bestRank > 0 && bestRank < 9999 ? ` · 最高榜 #${bestRank}` : ""}
-            ${d.series_name ? ` · 系列：${esc(d.series_name)}` : ""}
-          </div>
-          ${
-            Array.isArray(langEditions) && langEditions.length > 0
-              ? `<div style="margin-top:4px;">
-                  ${langEditions
-                    .map(
-                      (ed) =>
-                        `<span class="tag-pill ${ed.workno === d.workno ? "user-tag" : ""}" data-action="jump-edition" data-workno="${esc(ed.workno)}" style="cursor:pointer;" title="切换/检索语言版本 ${esc(ed.workno)}">${esc(ed.label || ed.lang)}:${esc(ed.workno)}</span>`
-                    )
-                    .join("")}
-                </div>`
-              : ""
-          }
-        </div>
-      </div>
-
-      ${
-        state.editingMeta
-          ? `
-        <div class="drawer-section">
-          <div class="drawer-section-title">手工编辑元数据（离线兜底）</div>
-          <div class="form-row"><label>标题</label><input id="meta-title" value="${esc(d.title)}" style="flex:1" /></div>
-          <div class="form-row"><label>社团</label><input id="meta-circle" value="${esc(d.circle_name)}" style="flex:1" /></div>
-          <div class="form-row"><label>发售日</label><input id="meta-date" value="${esc(d.release_date)}" placeholder="YYYY-MM-DD" style="flex:1" /></div>
-          <div class="form-row">
-            <label>分级</label>
-            <select id="meta-age" style="flex:1">
-              <option value="1" ${d.age_category === 1 ? "selected" : ""}>全年龄 (GEN)</option>
-              <option value="2" ${d.age_category === 2 ? "selected" : ""}>R15</option>
-              <option value="3" ${d.age_category === 3 ? "selected" : ""}>R18</option>
-              <option value="0" ${!d.age_category ? "selected" : ""}>未分级</option>
-            </select>
-          </div>
-          <div class="form-row"><label>声优 (逗号分隔)</label><input id="meta-vas" value="${esc((d.vas || []).join(", "))}" style="flex:1" /></div>
-          <div class="form-row"><label>DLsite标签</label><input id="meta-tags" value="${esc(dlsiteTags.map((t) => t.name).join(", "))}" style="flex:1" /></div>
-          <button class="primary" data-action="save-meta" style="width:100%;">保存元数据</button>
-        </div>
-      `
-          : ""
-      }
-
-      <div class="drawer-section">
-        <div class="drawer-section-title">个人状态与自定义标签</div>
-        <div style="display:flex;gap:6px;margin-bottom:6px;">
-          <select id="state-progress" data-action="change-state">
-            ${Object.entries(PROGRESS_LABELS)
-              .map(([k, label]) => `<option value="${k}" ${(d.progress || "") === k ? "selected" : ""}>${label}</option>`)
-              .join("")}
+      <div class="queue-preferences">
+        ${chapters.length ? `
+          <select id="player-chapter" aria-label="跳转章节">
+            <option value="">跳转章节</option>
+            ${chapters.map(({ start, title }) => `<option value="${Number(start)}">${esc(title)} · ${start === 0 ? "00:00" : fmtSec(start)}</option>`).join("")}
           </select>
-          <select id="state-rating" data-action="change-state">
-            <option value="0">未评分</option>
-            ${[5, 4, 3, 2, 1]
-              .map((r) => `<option value="${r}" ${d.user_rating === r ? "selected" : ""}>${"★".repeat(r)}</option>`)
-              .join("")}
-          </select>
-          <input id="state-review" value="${esc(d.state?.review || "")}" placeholder="短评备注..." style="flex:1;" />
-          <button data-action="save-state">保存</button>
-        </div>
-        <div style="margin-bottom:6px;">
-          ${(d.tags || [])
-            .map(
-              (t) =>
-                `<span class="tag-pill ${t.source === "user" ? "user-tag" : ""}" data-action="filter-tag" data-val="${esc(t.name)}" style="cursor:pointer;">${esc(t.name)}</span>`
-            )
-            .join("")}
-        </div>
-        <div style="display:flex;gap:6px;">
-          <input id="user-tags-input" value="${esc(userTags.join(", "))}" placeholder="自定义标签（逗号分隔）" style="flex:1;" />
-          <button data-action="save-user-tags">更新标签</button>
-        </div>
+        ` : ""}
+        <select id="player-rate" aria-label="播放速度">
+          ${[0.75, 1, 1.25, 1.5, 2].map((rate) => `<option value="${rate}" ${p.playbackRate === rate ? "selected" : ""}>${rate}×</option>`).join("")}
+        </select>
+        <button type="button" class="${p.incognito ? "active" : ""}" data-action="toggle-incognito" aria-pressed="${p.incognito}" title="无痕收听时不记录历史或进度">无痕收听</button>
       </div>
-
-      <div class="drawer-section">
-        <div class="drawer-section-title">
-          <span>音轨目录树 (${d.tracks ? d.tracks.length : 0})</span>
-          <span style="font-weight:400;">按所在版本目录独立建队</span>
-        </div>
-        ${d.tree && d.tree.length > 0 ? renderTreeNodes(d.tree, "") : `<div style="color:var(--muted);">暂无本地音轨文件</div>`}
-      </div>
-
-      ${
-        Array.isArray(remoteAttachments) && remoteAttachments.length > 0
-          ? `<div class="drawer-section">
-              <div class="drawer-section-title">特典与文本附件 (${remoteAttachments.length})</div>
-              ${remoteAttachments
-                .slice(0, 20)
-                .map(
-                  (att) =>
-                    `<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;">
-                      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(att.rel_path)}">[${esc(att.type)}] ${esc(att.rel_path)}</span>
-                      ${att.download_url ? `<a href="${esc(att.download_url)}" target="_blank" rel="noreferrer" style="color:#93c5fd;flex-shrink:0;margin-left:6px;">查看</a>` : ""}
-                    </div>`
-                )
-                .join("")}
-            </div>`
-          : ""
-      }
-
-      ${
-        d.paths && d.paths.length > 0
-          ? `<div class="drawer-section">
-              <div class="drawer-section-title">存储路径 (${d.paths.length})</div>
-              ${d.paths.map((p) => `<div class="mono" style="color:var(--muted);font-size:11px;word-break:break-all;">[${esc(p.storage_name)}] ${esc(p.rel_path)}</div>`).join("")}
-            </div>`
-          : ""
-      }
     </aside>
   `;
 }
 
-function renderWorksTab() {
-  const totalPages = Math.max(1, Math.ceil(state.totalWorks / state.pageSize));
+function renderSleepMenu() {
+  const deadline = state.player.sleepDeadline;
+  if (!state.player.sleepMenuOpen) return "";
+  const time = deadline ? new Date(deadline).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+  }) : "";
   return `
-    ${
-      state.recent.length > 0
-        ? `<div class="recent-strip">
-            ${state.recent
-              .map(
-                (r) => `
-              <div class="recent-chip" data-action="resume-recent" data-workno="${esc(r.workno)}" title="继续播放：${esc(r.work_title)} (${fmtSec(r.position)})">
-                <img src="/api/cover/${esc(r.workno)}" alt="" />
-                <div class="recent-meta">
-                  <div class="recent-title">▶ ${esc(r.work_title)}</div>
-                  <div class="recent-sub">${esc(r.track_name || r.workno)} · 续播 ${fmtSec(r.position)}</div>
-                </div>
-              </div>
-            `
-              )
-              .join("")}
-          </div>`
-        : ""
-    }
-
-    <div class="filter-strip">
-      <select id="filter-age">
-        <option value="general" ${state.ageMode === "general" ? "selected" : ""}>仅全年龄 (SFW)</option>
-        <option value="sfw_unrated" ${state.ageMode === "sfw_unrated" ? "selected" : ""}>全年龄 + 未分级</option>
-        <option value="r15" ${state.ageMode === "r15" ? "selected" : ""}>R15 及以下</option>
-        <option value="r18" ${state.ageMode === "r18" ? "selected" : ""}>仅 R18</option>
-        <option value="all" ${state.ageMode === "all" ? "selected" : ""}>全部分级</option>
-      </select>
-
-      <select id="filter-progress">
-        <option value="">全部进度</option>
-        ${Object.entries(PROGRESS_LABELS)
-          .filter(([k]) => k !== "")
-          .map(([k, v]) => `<option value="${k}" ${state.progress === k ? "selected" : ""}>${v}</option>`)
-          .join("")}
-      </select>
-
-      <select id="filter-circle">
-        <option value="">全部社团 (${state.facets.circles.length})</option>
-        ${state.facets.circles
-          .map((c) => `<option value="${esc(c.name)}" ${state.circle === c.name ? "selected" : ""}>${esc(c.name)} (${c.count})</option>`)
-          .join("")}
-      </select>
-
-      <select id="filter-va">
-        <option value="">全部声优 (${state.facets.vas.length})</option>
-        ${state.facets.vas
-          .map((v) => `<option value="${esc(v.name)}" ${state.va === v.name ? "selected" : ""}>${esc(v.name)} (${v.count})</option>`)
-          .join("")}
-      </select>
-
-      <select id="filter-tag">
-        <option value="">全部标签 (${state.facets.tags.length})</option>
-        ${state.facets.tags
-          .map((t) => `<option value="${esc(t.name)}" ${state.tag === t.name ? "selected" : ""}>${esc(t.name)} (${t.count})</option>`)
-          .join("")}
-      </select>
-
-      <select id="filter-sort">
-        <option value="release_date" ${state.sortBy === "release_date" ? "selected" : ""}>按发售日</option>
-        <option value="created_at" ${state.sortBy === "created_at" ? "selected" : ""}>按入库时间</option>
-        <option value="rating" ${state.sortBy === "rating" ? "selected" : ""}>按评分</option>
-        <option value="dl_count" ${state.sortBy === "dl_count" ? "selected" : ""}>按销量</option>
-        <option value="workno" ${state.sortBy === "workno" ? "selected" : ""}>按作品号</option>
-      </select>
-
-      <button class="${state.subtitleOnly ? "active" : ""}" data-action="toggle-sub-only">带字幕</button>
-
-      ${
-        state.circle || state.va || state.tag || state.progress || state.query || state.subtitleOnly
-          ? `<button data-action="reset-filters">重置筛选</button>`
-          : ""
-      }
-
-      <div style="margin-left:auto;display:flex;align-items:center;gap:6px;">
-        <span style="color:var(--muted);">共 ${state.totalWorks} 部</span>
-        <button class="${state.viewMode === "table" ? "active" : ""}" data-action="set-view" data-mode="table">紧凑表格</button>
-        <button class="${state.viewMode === "grid" ? "active" : ""}" data-action="set-view" data-mode="grid">封面网格</button>
-      </div>
-    </div>
-
-    ${
-      state.viewMode === "table"
-        ? `
-      <table class="compact-table works-table">
-        <thead>
-          <tr>
-            <th style="width:98px;">作品号</th>
-            <th style="width:62px;">分级</th>
-            <th>标题</th>
-            <th style="width:130px;">社团</th>
-            <th style="width:150px;">声优</th>
-            <th style="width:190px;">标签</th>
-            <th style="width:66px;">进度</th>
-            <th style="width:56px;">音轨</th>
-            <th style="width:86px;">发售日</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${
-            state.works.length === 0
-              ? `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:24px;">暂无匹配作品（请前往「设置与存储」添加目录扫描，或切换左上角分级筛选）</td></tr>`
-              : state.works
-                  .map(
-                    (w) => `
-              <tr class="${state.selectedWorkno === w.workno ? "selected" : ""}" data-action="open-work" data-workno="${esc(w.workno)}"
-                  title="${esc(w.workno)} · ${esc(w.title)} | 评分:${w.rating || "-"} 销量:${w.dl_count || 0}">
-                <td class="mono">${esc(w.workno)}</td>
-                <td>${ageBadgeHTML(w.age_category)}</td>
-                <td class="work-title-cell">${w.has_subtitle ? `<span class="badge badge-sfw">字</span>` : ""}${esc(w.title)}</td>
-                <td>${esc(w.circle_name || "-")}</td>
-                <td title="${esc((w.vas || []).join(", "))}">${esc((w.vas || []).join(" / ") || "-")}</td>
-                <td title="${esc((w.tags || []).map((t) => t.name).join(", "))}">
-                  ${(w.tags || [])
-                    .slice(0, 3)
-                    .map((t) => `<span class="tag-pill ${t.source === "user" ? "user-tag" : ""}">${esc(t.name)}</span>`)
-                    .join("")}
-                </td>
-                <td>${esc(PROGRESS_LABELS[w.progress || ""] || "-")}</td>
-                <td>${w.track_count || 0}</td>
-                <td class="mono">${esc(w.release_date || "-")}</td>
-              </tr>
-            `
-                  )
-                  .join("")
-          }
-        </tbody>
-      </table>
-    `
-        : `
-      <div class="card-grid">
-        ${state.works
-          .map(
-            (w) => `
-          <div class="work-card" data-action="open-work" data-workno="${esc(w.workno)}" title="${esc(w.title)}">
-            <img src="/api/cover/${esc(w.workno)}" loading="lazy" alt="${esc(w.workno)}" />
-            <div class="work-card-body">
-              <div style="margin-bottom:3px;">${ageBadgeHTML(w.age_category)}<span class="mono" style="color:var(--muted);">${esc(w.workno)}</span></div>
-              <div class="work-card-title">${esc(w.title)}</div>
-              <div style="color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-                ${esc(w.circle_name || "-")} · ${(w.vas || []).join("/") || "-"}
-              </div>
-            </div>
-          </div>
-        `
-          )
-          .join("")}
-      </div>
-    `
-    }
-
-    <div class="pagination">
-      <button data-action="prev-page" ${state.page <= 1 ? "disabled" : ""}>上一页</button>
-      <span style="color:var(--muted);">第 ${state.page} / ${totalPages} 页</span>
-      <button data-action="next-page" ${state.page >= totalPages ? "disabled" : ""}>下一页</button>
+    <div class="player-timer-menu" id="player-timer-menu" aria-label="睡眠定时">
+      <strong>${deadline ? `将在 ${time} 暂停` : "睡眠定时"}</strong>
+      ${[5, 15, 30, 60].map((minutes) => `<button type="button" data-action="set-sleep-timer" data-minutes="${minutes}">${minutes} 分钟</button>`).join("")}
+      ${deadline ? '<button type="button" data-action="set-sleep-timer" data-minutes="0">取消定时</button>' : ""}
     </div>
   `;
 }
 
-function renderHistoryTab() {
-  return `
-    <div class="filter-strip">
-      <span style="color:var(--muted);">收听会话历史（30 分钟内自动聚合 · 当前分级过滤：${esc(state.ageMode)}）</span>
-      <div style="margin-left:auto;display:flex;gap:6px;">
-        <button data-action="clear-history-days" data-days="7">清除近 7 天</button>
-        <button class="danger" data-action="clear-history-all">清空全部历史并压缩数据库 (VACUUM)</button>
-      </div>
-    </div>
-
-    <table class="compact-table">
-      <thead>
-        <tr>
-          <th style="width:98px;">作品号</th>
-          <th style="width:62px;">分级</th>
-          <th>作品标题</th>
-          <th style="width:200px;">续播音轨</th>
-          <th style="width:88px;">续播位置</th>
-          <th style="width:88px;">实听时长</th>
-          <th style="width:155px;">最后收听</th>
-          <th style="width:110px;">操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${
-          state.historyItems.length === 0
-            ? `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">暂无收听记录</td></tr>`
-            : state.historyItems
-                .map(
-                  (h) => `
-            <tr>
-              <td class="mono">${esc(h.workno)}</td>
-              <td>${ageBadgeHTML(h.age_category)}</td>
-              <td class="work-title-cell">${esc(h.work_title)}</td>
-              <td title="${esc(h.track_name)}">${esc(h.track_name || "-")}</td>
-              <td class="mono">${fmtSec(h.position)}</td>
-              <td class="mono">${fmtSec(h.listened)}</td>
-              <td class="mono">${esc(fmtTimeAgo(h.last_at))}</td>
-              <td>
-                <button data-action="resume-history" data-id="${h.id}">续播</button>
-                <button class="danger" data-action="delete-history" data-id="${h.id}">删除</button>
-              </td>
-            </tr>
-          `
-                )
-                .join("")
-        }
-      </tbody>
-    </table>
-  `;
+function setSleepTimer(minutes) {
+  const p = state.player;
+  clearTimeout(sleepTimer);
+  sleepTimer = null;
+  p.sleepMenuOpen = false;
+  p.sleepDeadline = 0;
+  if (minutes === 0) return;
+  const delay = minutes * 60_000;
+  p.sleepDeadline = Date.now() + delay;
+  sleepTimer = setTimeout(() => {
+    sleepTimer = null;
+    p.sleepDeadline = 0;
+    audio.pause();
+    renderPlayerOnly();
+  }, delay);
 }
 
-function renderSettingsTab() {
-  const s = state.settings || {};
-  return `
-    <div class="settings-grid">
-      <div class="panel-box">
-        <h3>媒体库存储与扫描</h3>
-        <div style="margin-bottom:8px;">
-          ${
-            state.storages.length === 0
-              ? `<div style="color:var(--muted);margin-bottom:6px;">尚未配置本地音声目录</div>`
-              : state.storages
-                  .map(
-                    (st) => `
-              <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border);">
-                <div>
-                  <strong>${esc(st.name)}</strong>
-                  <span class="mono" style="color:var(--muted);margin-left:6px;">${esc(st.root)}</span>
-                </div>
-                <div style="display:flex;gap:4px;">
-                  <button data-action="scan-storage" data-id="${st.id}">扫描</button>
-                  <button class="danger" data-action="delete-storage" data-id="${st.id}">移除</button>
-                </div>
-              </div>
-            `
-                  )
-                  .join("")
-          }
-        </div>
-        <div style="display:flex;gap:6px;margin-bottom:10px;">
-          <input id="new-st-name" placeholder="别名 (如 Voices)" style="width:110px;" />
-          <input id="new-st-root" placeholder="本地绝对路径 (如 D:\\VOICES)" style="flex:1;" />
-          <button class="primary" data-action="add-storage">添加存储</button>
-        </div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;">
-          <button class="primary" data-action="scan-all" data-scrape="0">仅扫描本地文件（离线）</button>
-          <button data-action="scan-all" data-scrape="1">扫描并抓取 DLsite 元数据</button>
-          <button data-action="reindex-bleve">重建全文索引</button>
-          ${state.task.running ? `<button class="danger" data-action="cancel-task">中断当前任务</button>` : ""}
-        </div>
+function setQueueOpen(open, restoreFocus = true) {
+  if (state.player.queueOpen === open) return;
+  const drawer = document.getElementById("player-queue");
+  const scrim = document.getElementById("queue-scrim");
+  const trigger = document.querySelector('#player-bar [data-action="toggle-queue"]');
+  if (!open && drawer?.querySelector('.dropdown-trigger[aria-expanded="true"]')) closeDropdown();
 
-        <div style="border-top:1px solid var(--border);margin-top:10px;padding-top:10px;">
-          <h3 style="margin-bottom:6px;">asmr.one 全站目录与音轨树断点同步</h3>
-          ${
-            state.asmrCheckpoint
-              ? `<div style="font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.6;">
-                  <div><strong>进度：</strong>第 ${state.asmrCheckpoint.current_page || 0} / ${state.asmrCheckpoint.total_pages || "?"} 页（总库 ${state.asmrCheckpoint.total_count || "?"} 部 · 新增 ${state.asmrCheckpoint.inserted || 0} · 重复跳过 ${state.asmrCheckpoint.duplicates || 0} · 失败 ${state.asmrCheckpoint.failures || 0}）</div>
-                  <div><strong>字段完整度：</strong>社团 ${state.asmrCheckpoint.completeness?.circle_rate_pct ?? 0}% · 声优 ${state.asmrCheckpoint.completeness?.va_rate_pct ?? 0}% · 标签 ${state.asmrCheckpoint.completeness?.tags_rate_pct ?? 0}% · 封面 ${state.asmrCheckpoint.completeness?.cover_rate_pct ?? 0}%</div>
-                  <div><strong>速度 / ETA：</strong>${state.asmrCheckpoint.works_per_sec || 0} 部/s · 下次续跑页码 #${state.asmrCheckpoint.next_page || 1}${state.asmrCheckpoint.eta_seconds ? ` · 预计剩余 ${fmtSec(state.asmrCheckpoint.eta_seconds)}` : ""}</div>
-                </div>`
-              : `<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">支持按页增量写入 SQLite + Bleve 并保存精确页码断点；点开任意作品自动拉取远端音轨目录树与同步字幕。</div>`
-          }
-          <div style="display:flex;gap:6px;flex-wrap:wrap;">
-            <button class="primary" data-action="sync-asmrone-full">启动 / 断点续跑全站同步</button>
-            <button data-action="sync-asmrone-latest">快速同步最新 200 部</button>
-            ${state.task.running ? `<button class="danger" data-action="cancel-task">暂停并保存断点</button>` : ""}
-          </div>
-        </div>
-      </div>
+  state.player.queueOpen = open;
+  trigger?.setAttribute("aria-expanded", String(open));
+  if (!open && restoreFocus) trigger?.focus({ preventScroll: true });
+  for (const surface of [drawer, scrim]) {
+    if (!surface) continue;
+    surface.inert = !open;
+    surface.setAttribute("aria-hidden", String(!open));
+  }
+  if (open) document.getElementById("queue-close")?.focus({ preventScroll: true });
+}
 
-      <div class="panel-box">
-        <h3>隐私、分级与代理设置</h3>
-        <div class="form-row">
-          <label>默认隐藏非全年龄作品 (SFW)</label>
-          <input type="checkbox" id="cfg-hide-nsfw" ${s.default_hide_nsfw ? "checked" : ""} />
-        </div>
-        <div class="form-row">
-          <label>开启收听历史记录（关闭后不写任何记录）</label>
-          <input type="checkbox" id="cfg-history-enabled" ${s.history_enabled ? "checked" : ""} />
-        </div>
-        <div class="form-row">
-          <label>历史保留上限（天数 / 条数）</label>
-          <div style="display:flex;gap:4px;">
-            <input type="number" id="cfg-hist-days" value="${s.history_max_days ?? 90}" style="width:72px;" />
-            <input type="number" id="cfg-hist-entries" value="${s.history_max_entries ?? 500}" style="width:72px;" />
-          </div>
-        </div>
-        <div class="form-row">
-          <label>播放心跳间隔（秒）</label>
-          <input type="number" id="cfg-hb-sec" value="${s.heartbeat_interval_sec ?? 30}" style="width:90px;" />
-        </div>
-        <div class="form-row">
-          <label>元数据语言 (locale)</label>
-          <select id="cfg-locale">
-            ${["zh_cn", "ja_jp", "zh_tw", "en_us", "ko_kr"]
-              .map((l) => `<option value="${l}" ${s.scraper_locale === l ? "selected" : ""}>${l}</option>`)
-              .join("")}
-          </select>
-        </div>
-        <div class="form-row">
-          <label>抓取代理（支持账密 HTTP/SOCKS5）</label>
-          <input id="cfg-proxy" value="${esc(s.scraper_proxy || "")}" placeholder="socks5://user:pass@127.0.0.1:1080" style="width:220px;" />
-        </div>
-        <div class="form-row">
-          <label>抓取固定间隔（秒）</label>
-          <input type="number" step="0.5" id="cfg-interval" value="${s.scraper_interval_sec ?? 3}" style="width:90px;" />
-        </div>
-        <div class="form-row">
-          <label>启用 asmr.one 四级元数据兜底</label>
-          <input type="checkbox" id="cfg-asmrone" ${s.asmrone_enabled !== false ? "checked" : ""} />
-        </div>
-        <div class="form-row">
-          <label>最大扫描深度</label>
-          <input type="number" id="cfg-depth" value="${s.scan_max_depth ?? 6}" style="width:90px;" />
-        </div>
-        <div class="form-row">
-          <label>启用只读 WebDAV (/dav/)</label>
-          <input type="checkbox" id="cfg-webdav" ${s.webdav_enabled ? "checked" : ""} />
-        </div>
-        <div class="form-row">
-          <label>开启多用户登录认证</label>
-          <input type="checkbox" id="cfg-auth" ${s.auth_enabled ? "checked" : ""} />
-        </div>
-        <button class="primary" data-action="save-settings" style="width:100%;">保存设置</button>
-      </div>
+function closePlayerOverlay(restoreFocus = true) {
+  if (state.player.queueOpen) {
+    setQueueOpen(false, restoreFocus);
+    return true;
+  }
+  if (!state.player.sleepMenuOpen) return false;
+  state.player.sleepMenuOpen = false;
+  document.querySelector(".player-timer-menu")?.remove();
+  const trigger = document.querySelector('#player-bar [data-action="toggle-sleep-menu"]');
+  trigger?.setAttribute("aria-expanded", "false");
+  if (restoreFocus) trigger?.focus({ preventScroll: true });
+  return true;
+}
 
-      <div class="panel-box">
-        <h3>用户账号与元数据备份</h3>
-        <div style="display:flex;gap:6px;margin-bottom:8px;">
-          <input id="new-user-name" placeholder="用户名" style="width:100px;" />
-          <input id="new-user-pwd" type="password" placeholder="密码 (≥4位)" style="flex:1;" />
-          <label style="display:flex;align-items:center;gap:3px;"><input type="checkbox" id="new-user-admin" checked />管理员</label>
-          <button data-action="create-user">保存账号</button>
-        </div>
-        <div style="margin-bottom:10px;color:var(--muted);">
-          当前用户：${(state.users || []).map((u) => `${esc(u.username)}${u.must_reset_password ? "(待设密)" : ""}`).join(", ") || "default"}
-        </div>
-        <div style="display:flex;gap:6px;">
-          <a href="/api/export/metadata" target="_blank"><button type="button">导出元数据 JSON</button></a>
-          <label style="cursor:pointer;border:1px solid var(--border);padding:4px 10px;border-radius:4px;background:var(--panel-alt);">
-            导入元数据 JSON
-            <input type="file" id="import-meta-file" accept=".json" style="display:none;" />
-          </label>
-        </div>
-      </div>
-    </div>
-  `;
+function togglePlayerCollapse() {
+  const collapsed = !state.playerCollapsed;
+  state.playerCollapsed = collapsed;
+  savePreference("player-collapsed", String(collapsed));
+  if (collapsed) closePlayerOverlay(false);
+
+  const bar = document.getElementById("player-bar");
+  const dock = document.getElementById("player-dock");
+  bar.closest(".layout").classList.toggle("player-collapsed", collapsed);
+  const visible = collapsed ? dock : bar;
+  const hidden = collapsed ? bar : dock;
+  visible.inert = false;
+  visible.setAttribute("aria-hidden", "false");
+  const toggle = document.getElementById(collapsed ? "player-expand" : "player-collapse");
+  toggle.focus({ preventScroll: true });
+  hidden.inert = true;
+  hidden.setAttribute("aria-hidden", "true");
 }
 
 function renderPlayerHTML() {
   const p = state.player;
+  const collapsed = state.playerCollapsed;
+  const title = p.track?.title || p.track?.rel_path || "尚未播放";
+  const dockTitle = p.track ? p.workTitle || p.workno || title : title;
+  const cover = p.workno
+    ? `<img src="/api/cover/${encodeURIComponent(p.workno)}" alt="" />`
+    : icon("headphones");
+  const credit = p.workVas.join(" / ") || p.workTitle;
+  const subtitle = p.error || (p.showSubtitles ? p.activeSubtitle : "");
+  const favorite = Boolean(p.workno && isFavorite(p.workno));
+  const muted = audio.muted || audio.volume === 0;
+  const maxSeek = Math.max(1, Math.floor(p.duration));
+  const seekValue = Math.min(maxSeek, Math.floor(p.currentTime));
   return `
-    <div class="player-bar" id="player-bar">
-      <div class="player-info">
-        <div class="player-track-title" title="${esc(p.track ? p.track.rel_path : "")}">
-          ${p.track ? esc(p.track.rel_path) : "未播放音轨"}
+    <div class="player-shell">
+      <footer class="player-bar" id="player-bar" aria-label="播放器" aria-hidden="${collapsed}" ${collapsed ? "inert" : ""}>
+        <div class="player-info">
+          <div class="player-cover">
+            ${cover}
+          </div>
+          <div class="player-track-meta">
+            <div class="player-track-title" title="${esc(title)}">${esc(title)}</div>
+            ${credit ? `<div class="player-work-sub" title="${esc(credit)}">${esc(credit)}</div>` : ""}
+          </div>
+          ${renderPlayerButton("toggle-favorite", "heart", favorite ? "移出收藏" : "收藏作品",
+            `data-workno="${esc(p.workno)}" aria-pressed="${favorite}" ${p.workno ? "" : "disabled"}`)}
         </div>
-        <div class="player-work-sub">
-          ${p.workno ? `${esc(p.workno)} · ${esc(p.workTitle)}` : "选择作品并点击音轨即可播放"}
+
+        <div class="player-center">
+          <div class="player-controls">
+            ${renderPlayerButton("player-prev", "previous", "上一首", p.queueIndex <= 0 ? "disabled" : "")}
+            ${renderPlayerButton("player-toggle", p.playing ? "pause" : "play", p.playing ? "暂停" : "播放", p.track ? "" : "disabled", "player-play")}
+            ${renderPlayerButton("player-next", "next", "下一首", p.queueIndex + 1 >= p.queue.length ? "disabled" : "")}
+          </div>
+          <div class="player-seek-row">
+            <span id="player-elapsed" class="player-elapsed mono">${p.currentTime ? fmtSec(p.currentTime) : "00:00"}</span>
+            <input id="player-seek" type="range" min="0" max="${maxSeek}" value="${seekValue}" aria-label="播放进度" style="--played:${100 * seekValue / maxSeek}%" ${p.track ? "" : "disabled"} />
+            <span id="player-duration" class="player-duration mono">${fmtSec(p.duration)}</span>
+          </div>
         </div>
-      </div>
 
-      <div class="player-controls">
-        <button data-action="player-prev" ${!p.track || p.queueIndex <= 0 ? "disabled" : ""}>⏮</button>
-        <button class="primary" data-action="player-toggle" ${!p.track ? "disabled" : ""}>${p.playing ? "⏸" : "▶"}</button>
-        <button data-action="player-next" ${!p.track || p.queueIndex + 1 >= p.queue.length ? "disabled" : ""}>⏭</button>
-      </div>
-
-      <div class="player-Timeline">
-        <div class="player-seek-row">
-          <input id="player-seek" type="range" min="0" max="${Math.max(1, Math.floor(p.duration || 1))}" value="${Math.floor(p.currentTime || 0)}" ${!p.track ? "disabled" : ""} />
-          <span id="player-time" class="mono">${fmtSec(p.currentTime)} / ${fmtSec(p.duration)}</span>
+        <div class="player-tools">
+          ${renderPlayerButton("toggle-player-subtitles", "captions", "字幕", `aria-pressed="${p.showSubtitles}"`)}
+          ${renderPlayerButton("toggle-sleep-menu", "timer", "睡眠定时", `aria-expanded="${p.sleepMenuOpen}" aria-controls="player-timer-menu"`, p.sleepDeadline ? "active" : "")}
+          ${renderPlayerButton("toggle-queue", "queue", "播放队列", `aria-expanded="${p.queueOpen}" aria-controls="player-queue"`)}
+          <div class="player-volume">
+            ${renderPlayerButton("toggle-mute", muted ? "volume-off" : "volume", muted ? "取消静音" : "静音", `aria-pressed="${muted}"`)}
+            <input id="player-volume" type="range" min="0" max="100" step="1" value="${Math.round(audio.volume * 100)}" aria-label="音量" style="--played:${muted ? 0 : audio.volume * 100}%" />
+          </div>
+          ${renderPlayerButton("toggle-player-collapse", "chevron-down", "收起播放栏",
+            'id="player-collapse" aria-controls="player-bar" aria-expanded="true"', "player-collapse")}
+          ${renderSleepMenu()}
         </div>
-        <div id="player-sub" class="subtitle-line">${esc(p.activeSubtitle || "")}</div>
-      </div>
-
-      <div style="display:flex;align-items:center;gap:6px;">
-        <select id="player-rate" title="倍速">
-          ${[0.75, 1.0, 1.25, 1.5, 2.0]
-            .map((r) => `<option value="${r}" ${p.playbackRate === r ? "selected" : ""}>${r}x</option>`)
-            .join("")}
-        </select>
-        <button class="${p.incognito ? "active" : ""}" data-action="toggle-incognito" title="无痕收听：本次会话不上报播放进度与历史">
-          ${p.incognito ? "🕵️ 无痕开启" : "无痕"}
-        </button>
-      </div>
+      </footer>
+      <aside id="player-dock" class="player-dock" aria-label="迷你播放器"
+        aria-hidden="${!collapsed}" ${collapsed ? "" : "inert"}>
+        <div class="player-cover">${cover}</div>
+        <div class="player-dock-meta">
+          <div class="player-dock-title" title="${esc(dockTitle)}">${esc(dockTitle)}</div>
+          ${p.track && title !== dockTitle ? `<div class="player-dock-track" title="${esc(title)}">${esc(title)}</div>` : ""}
+        </div>
+        ${renderPlayerButton("player-toggle", p.playing ? "pause" : "play", p.playing ? "暂停" : "播放",
+          `id="player-dock-toggle" ${p.track ? "" : "disabled"}`, "player-dock-toggle")}
+        ${renderPlayerButton("toggle-player-collapse", "chevron-up", "展开播放栏",
+          'id="player-expand" aria-controls="player-bar" aria-expanded="false"', "player-dock-expand")}
+      </aside>
+      <div id="player-sub" class="subtitle-line" role="status" ${subtitle ? "" : "hidden"}>${esc(subtitle)}</div>
+      ${renderQueueDrawer()}
     </div>
   `;
 }
 
 function renderPlayerOnly() {
-  const existing = document.getElementById("player-bar");
-  if (!existing) {
-    render();
-    return;
+  const existing = document.querySelector(".player-shell");
+  if (!existing) return;
+  if (existing.querySelector('.dropdown-trigger[aria-expanded="true"]')) closeDropdown(true);
+  const focusedButton = captureButtonFocus(existing);
+  const focusedField = existing.contains(document.activeElement) ? document.activeElement.id : "";
+  const queueScrollTop = existing.querySelector(".queue-items")?.scrollTop;
+  const template = document.createElement("template");
+  template.innerHTML = renderPlayerHTML();
+  const player = template.content.firstElementChild;
+  for (const selector of ["#player-bar", "#player-dock", "#player-sub"]) {
+    existing.querySelector(selector).replaceWith(player.querySelector(selector));
   }
-  const tmp = document.createElement("div");
-  tmp.innerHTML = renderPlayerHTML();
-  existing.replaceWith(tmp.firstElementChild);
+  // Keep the sliding surfaces mounted while playback updates the queue.
+  const queueDrawer = existing.querySelector(".queue-drawer");
+  queueDrawer.replaceChildren(...player.querySelector(".queue-drawer").childNodes);
   bindPlayerInputs();
+  enhanceDropdowns(existing, icon("chevron-down"));
+  const queue = queueDrawer.querySelector(".queue-items");
+  if (queue && queueScrollTop !== undefined) queue.scrollTop = queueScrollTop;
+  restoreButtonFocus(existing, focusedButton);
+  if (focusedField) document.getElementById(focusedField)?.focus({ preventScroll: true });
 }
 
-function renderLogin() {
-  return `
-    <div class="login-wrap">
-      <form class="login-card" id="login-form">
-        <h2 style="font-size:15px;margin-bottom:12px;">Otoha · 登录</h2>
-        <div class="form-row"><label>用户名</label><input id="login-user" required style="width:180px;" /></div>
-        <div class="form-row"><label>密码</label><input id="login-pwd" type="password" required style="width:180px;" /></div>
-        ${
-          state.mustResetPassword
-            ? `<div style="color:#fde047;margin-bottom:8px;">检测到迁移账号，请直接输入新密码完成首次设密。</div>`
-            : ""
-        }
-        <button class="primary" type="submit" style="width:100%;">进入媒体库</button>
-      </form>
-    </div>
-  `;
+function captureButtonFocus(scope) {
+  const button = document.activeElement;
+  if (!scope?.contains(button) || !button.matches("button:focus-visible")) return null;
+  return { data: { ...button.dataset }, form: button.form?.id || "" };
+}
+
+function restoreButtonFocus(scope, focusedButton) {
+  if (!scope || !focusedButton) return;
+  const button = [...scope.querySelectorAll("button:enabled")].find((candidate) =>
+    !candidate.closest("[inert]") && (candidate.form?.id || "") === focusedButton.form &&
+    Object.keys(candidate.dataset).length === Object.keys(focusedButton.data).length &&
+    Object.entries(focusedButton.data).every(([key, value]) => candidate.dataset[key] === value)
+  );
+  button?.focus({ preventScroll: true });
+}
+
+function sidebarCollapseLabel() {
+  return state.sidebarCollapsed ? "展开导航文字" : "折叠为图标栏";
+}
+
+function sidebarVisibilityLabel() {
+  return state.sidebarHidden ? "展开侧边栏" : "收起侧边栏";
+}
+
+function updateSidebarToggle(button, expanded, label) {
+  button.setAttribute("aria-expanded", String(expanded));
+  button.setAttribute("aria-label", label);
+  button.title = label;
+}
+
+function syncSidebarPresentation() {
+  const sidebar = document.getElementById("library-sidebar");
+  if (!sidebar) return;
+  const visibilityToggle = document.querySelector(".sidebar-visibility-toggle");
+  if (state.sidebarHidden && sidebar.contains(document.activeElement)) {
+    visibilityToggle.focus({ preventScroll: true });
+  }
+  sidebar.closest(".layout").classList.toggle("sidebar-collapsed", state.sidebarCollapsed);
+  sidebar.setAttribute("aria-hidden", String(state.sidebarHidden));
+  sidebar.toggleAttribute("inert", state.sidebarHidden);
+  updateSidebarToggle(sidebar.querySelector(".sidebar-toggle"), !state.sidebarCollapsed, sidebarCollapseLabel());
+  updateSidebarToggle(visibilityToggle, !state.sidebarHidden, sidebarVisibilityLabel());
+}
+
+function captureDrawerInputs(drawer) {
+  if (!drawer || drawer.dataset.workno !== state.detail?.workno || drawerClosing) return [];
+  const inputs = [];
+  for (const field of drawer.querySelectorAll("input[id], select[id], textarea[id]")) {
+    const initial = field.tagName === "SELECT"
+      ? (field.querySelector("option[selected]") ?? field.options[0]).value
+      : field.defaultValue;
+    const focused = document.activeElement === field;
+    if (field.value === initial && !focused) continue;
+    inputs.push({
+      id: field.id,
+      value: field.value,
+      initial,
+      focused,
+      selectionStart: field.selectionStart,
+      selectionEnd: field.selectionEnd,
+    });
+  }
+  return inputs;
+}
+
+function restoreDrawerInputs(inputs) {
+  for (const input of inputs) {
+    const field = document.getElementById(input.id);
+    if (!field) continue;
+    // Keep the draft if the redraw did not supply a new saved value.
+    if (field.value === input.initial) field.value = input.value;
+    if (input.focused) {
+      field.focus({ preventScroll: true });
+      if (Number.isInteger(input.selectionStart)) {
+        field.setSelectionRange(input.selectionStart, input.selectionEnd);
+      }
+    }
+  }
+}
+
+function applyTheme() {
+  document.documentElement.dataset.theme = state.theme;
+  const toggle = document.querySelector(".theme-toggle");
+  if (!toggle) return;
+  const isDark = state.theme === "dark";
+  const label = isDark ? "切换到浅色主题" : "切换到深色主题";
+  toggle.setAttribute("aria-label", label);
+  toggle.title = label;
+  toggle.querySelector("use").setAttribute("href", isDark ? "#icon-sun" : "#icon-moon");
+}
+
+function syncTaskIndicator() {
+  const status = document.querySelector('[data-action="show-task-status"]');
+  if (status) status.hidden = !state.task.running && state.task.phase !== "error";
+}
+
+function syncPage() {
+  const page = document.querySelector("[data-page-tab]");
+  if (page) syncNavigation(page);
+  for (const time of document.querySelectorAll("[data-history-time]")) {
+    time.textContent = fmtTimeAgo(Number(time.dataset.historyTime));
+  }
+  render();
+  enhanceDropdowns(document.getElementById("app"), icon("chevron-down"));
+}
+
+function syncNavigation(page) {
+  state.tab = page.dataset.pageTab;
+  state.browseQuery = page.dataset.browseQuery;
+  document.querySelector(".main-pane").dataset.page = state.tab;
+  if (state.tab === "works" && new URLSearchParams(location.search).has("view")) {
+    const view = page.dataset.view;
+    savePreference("view", view);
+    document.cookie = `otoha_view=${view}; Path=/; Max-Age=31536000; SameSite=Lax`;
+  }
+  for (const link of document.querySelectorAll("[data-nav-path]")) {
+    link.href = link.dataset.navPath === "/"
+      ? page.dataset.homeUrl
+      : link.dataset.navPath + page.dataset.browseQuery;
+    if (link.dataset.navTab === state.tab) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+
+}
+
+let libraryHTML;
+let libraryRegion;
+
+function renderBrowserLibrary() {
+  const region = document.getElementById("browser-library");
+  if (!region) {
+    libraryRegion = null;
+    libraryHTML = null;
+    return;
+  }
+  const warning = isLibraryPersistent() ? "" : '<p class="banner-warn" role="status">浏览器存储不可用。收藏和播放列表仅保留在本次会话中。</p>';
+  const html = warning + (state.tab === "favorites"
+    ? renderFavoritesTab()
+    : renderPageHeading("播放列表") + renderPlaylists(esc, icon));
+  if (region !== libraryRegion || html !== libraryHTML) {
+    region.innerHTML = html;
+    window.htmx.process(region);
+    libraryRegion = region;
+    libraryHTML = html;
+  }
+}
+
+function syncFavorites() {
+  for (const button of document.querySelectorAll('[data-action="toggle-favorite"]')) {
+    const saved = isFavorite(button.dataset.workno);
+    const label = saved ? "取消收藏" : "收藏作品";
+    button.classList.toggle("active", saved);
+    button.setAttribute("aria-pressed", String(saved));
+    button.setAttribute("aria-label", label);
+    button.title = label;
+  }
+}
+
+function syncWorkSelection() {
+  for (const card of document.querySelectorAll(".work-card, .works-table tbody tr")) {
+    const workno = card.dataset.workCard ?? card.querySelector('[data-action="open-work"]')?.dataset.workno;
+    card.classList.toggle("selected", Boolean(workno && workno === state.selectedWorkno));
+  }
+  for (const track of document.querySelectorAll(".drawer button[data-action='play-track']")) {
+    const playing = Number(track.dataset.trackId) === state.player.track?.id;
+    track.closest(".tree-track").classList.toggle("playing", playing);
+    const marker = track.querySelector("[data-playing-marker]");
+    if (marker) marker.hidden = !playing;
+  }
+}
+
+function syncFolders() {
+  for (const label of document.querySelectorAll(".drawer [data-folder-key]")) {
+    const collapsed = Boolean(state.collapsedFolders[label.dataset.folderKey]);
+    label.setAttribute("aria-expanded", String(!collapsed));
+    label.nextElementSibling.hidden = collapsed;
+    label.querySelector("[data-folder-chevron]").textContent = collapsed ? "▸" : "▾";
+  }
+}
+
+function renderPlaylistOverlay() {
+  const region = document.getElementById("playlist-picker-region");
+  const html = renderPlaylistPicker(esc, icon);
+  const input = region.contains(document.activeElement) ? document.activeElement : null;
+  const draft = input?.value;
+  const selection = input && [input.selectionStart, input.selectionEnd];
+  region.innerHTML = html;
+  syncPlaylistPicker(render);
+  const field = input?.id && document.getElementById(input.id);
+  if (field && draft !== undefined) {
+    field.value = draft;
+    field.focus({ preventScroll: true });
+    if (Number.isInteger(selection[0])) field.setSelectionRange(...selection);
+  }
 }
 
 function render() {
-  const root = document.getElementById("app");
-  if (!state.booted) {
-    root.innerHTML = `<div style="padding:24px;color:var(--muted);">正在加载 Otoha...</div>`;
-    return;
+  const player = document.getElementById("player-region");
+  if (!player) return;
+  if (player.firstElementChild) renderPlayerOnly();
+  else {
+    player.closest(".layout").classList.toggle("player-collapsed", state.playerCollapsed);
+    player.innerHTML = renderPlayerHTML();
+    bindPlayerInputs();
+    enhanceDropdowns(player, icon("chevron-down"));
   }
-  if (state.authEnabled && !state.authenticated) {
-    root.innerHTML = renderLogin();
-    document.getElementById("login-form")?.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const username = document.getElementById("login-user").value;
-      const password = document.getElementById("login-pwd").value;
-      try {
-        await api("/api/auth/login", {
-          method: "POST",
-          body: { username, password, new_password: state.mustResetPassword ? password : "" },
-        });
-        state.mustResetPassword = false;
-        await bootstrap();
-      } catch (err) {
-        if (err.data && err.data.must_reset_password) {
-          state.mustResetPassword = true;
-          render();
-        } else {
-          alert(err.message);
-        }
-      }
-    });
-    return;
-  }
-
-  root.innerHTML = `
-    <div class="layout">
-      <header class="topbar">
-        <div class="brand">Otoha<span>音葉</span></div>
-        <nav class="nav-tabs">
-          <button class="${state.tab === "works" ? "active" : ""}" data-action="switch-tab" data-tab="works">音声库</button>
-          <button class="${state.tab === "history" ? "active" : ""}" data-action="switch-tab" data-tab="history">收听历史</button>
-          <button class="${state.tab === "settings" ? "active" : ""}" data-action="switch-tab" data-tab="settings">设置与存储</button>
-        </nav>
-
-        <form class="search-box" id="search-form">
-          <input id="search-input" value="${esc(state.query)}" placeholder="检索标题 / 社团 / 声优 / 标签（支持 空格交集、-排除、&quot;短语&quot;）" />
-          <button type="submit">检索</button>
-        </form>
-
-        <div class="topbar-right">
-          ${state.authEnabled && state.user ? `<span style="color:var(--muted);">${esc(state.user.username)}</span><button data-action="logout">退出</button>` : ""}
-        </div>
-      </header>
-
-      ${
-        state.searchDegraded
-          ? `<div class="banner-warn">
-              <span>全文索引处于降级模式（已自动切换为 SQL LIKE 检索）：${esc(state.searchWarning)}</span>
-              <button data-action="reindex-bleve">立即重建索引</button>
-            </div>`
-          : ""
-      }
-
-      ${
-        state.task && (state.task.running || state.task.phase === "error")
-          ? `<div class="task-bar">
-              <span>[${esc(state.task.phase)}] ${esc(state.task.message)}</span>
-              ${state.task.running ? `<button class="danger" data-action="cancel-task">中断</button>` : ""}
-            </div>`
-          : ""
-      }
-
-      <div class="workspace">
-        <main class="main-pane">
-          ${state.tab === "works" ? renderWorksTab() : state.tab === "history" ? renderHistoryTab() : renderSettingsTab()}
-        </main>
-        ${state.tab === "works" && state.detail ? renderDrawer() : ""}
-      </div>
-
-      ${renderPlayerHTML()}
-    </div>
-  `;
-
-  bindEvents();
-  bindPlayerInputs();
+  applyTheme();
+  syncSidebarPresentation();
+  syncTaskIndicator();
+  renderBrowserLibrary();
+  renderPlaylistOverlay();
+  syncFavorites();
+  syncWorkSelection();
+  syncFolders();
 }
+
+let drawerTransition;
+let pageTransition;
+let asmr18Draft;
+
+function rememberASMR18Draft() {
+  const urls = document.getElementById("asmr18-urls");
+  if (!urls) return;
+  const category = document.getElementById("asmr18-category");
+  const workers = document.getElementById("asmr18-workers");
+  const interval = document.getElementById("asmr18-interval");
+  const probe = document.getElementById("asmr18-probe");
+  const refresh = document.getElementById("asmr18-refresh");
+  asmr18Draft = {
+    urls: urls.value,
+    category: category.value,
+    workers: workers.value,
+    interval: interval.value,
+    probe: probe.checked,
+    refresh: refresh.checked,
+  };
+}
+
+function restoreASMR18Draft() {
+  const urls = document.getElementById("asmr18-urls");
+  if (!urls || !asmr18Draft) return;
+  urls.value = asmr18Draft.urls;
+  document.getElementById("asmr18-category").value = asmr18Draft.category;
+  document.getElementById("asmr18-workers").value = asmr18Draft.workers;
+  document.getElementById("asmr18-interval").value = asmr18Draft.interval;
+  document.getElementById("asmr18-probe").checked = asmr18Draft.probe;
+  document.getElementById("asmr18-refresh").checked = asmr18Draft.refresh;
+}
+
+function asmr18Options() {
+  const workers = document.getElementById("asmr18-workers");
+  const interval = document.getElementById("asmr18-interval");
+  for (const field of [workers, interval]) {
+    if (!field.checkValidity()) {
+      field.reportValidity();
+      throw new Error("请检查 ASMR18 采集参数");
+    }
+  }
+  return {
+    workers: workers.valueAsNumber || Number(workers.defaultValue),
+    interval_sec: Number.isNaN(interval.valueAsNumber) ? Number(interval.defaultValue) : interval.valueAsNumber,
+    probe_duration: document.getElementById("asmr18-probe").checked,
+  };
+}
+
+function refreshSettings() {
+  if (state.tab === "settings") return refreshPage();
+}
+
+function beforeDrawerSwap(detail) {
+  const requestId = Number(detail.requestConfig.headers["X-Otoha-Drawer"]);
+  if (requestId !== drawerRequestId) {
+    detail.shouldSwap = false;
+    return;
+  }
+  drawerResponseStatus = detail.xhr.status;
+  if (!detail.shouldSwap) return;
+  const drawer = detail.target.querySelector(".drawer");
+  drawerClosing = false;
+  drawerTransition = {
+    requestId,
+    pose: captureDrawerState(drawer),
+    inputs: detail.requestConfig.headers["X-Otoha-Preserve-Input"] === "1" ? captureDrawerInputs(drawer) : [],
+    focusedButton: drawer ? captureButtonFocus(drawer) : null,
+  };
+  cancelDrawerMotion();
+  closeDropdown(true);
+}
+
+function afterDrawerSwap(target) {
+  const drawer = target.querySelector(".drawer");
+  if (!drawer || !drawerTransition) return;
+  const { requestId, pose, inputs, focusedButton } = drawerTransition;
+  drawerTransition = null;
+  swappedDrawerRequest = requestId;
+  state.detail = JSON.parse(drawer.dataset.detail);
+  state.selectedWorkno = state.detail.workno;
+  syncDrawerMotion(pose);
+  if (pose?.workno === drawer.dataset.workno) {
+    restoreDrawerInputs(inputs);
+    restoreButtonFocus(drawer, focusedButton);
+  }
+  syncFavorites();
+  syncWorkSelection();
+  syncFolders();
+  enhanceDropdowns(drawer, icon("chevron-down"));
+}
+
+document.addEventListener("htmx:beforeSwap", ({ detail }) => {
+  if (detail.target.classList.contains("login-wrap") && detail.xhr.status === 422) {
+    detail.shouldSwap = true;
+    detail.isError = false;
+    return;
+  }
+  if (detail.target.id === "drawer-region") {
+    beforeDrawerSwap(detail);
+    return;
+  }
+  if (detail.target.id !== "page-content" || !detail.shouldSwap) return;
+  const { elt, headers, verb } = detail.requestConfig;
+  const navigate = headers["X-Otoha-Navigate"] === "1" ||
+    (elt !== detail.target && verb === "get");
+  const search = document.getElementById("search-input");
+  const resetsSearch = elt?.closest("[data-nav-path], #search-form, [data-clear-work-filters]");
+  const preserveSearch = !navigate || (!resetsSearch && search?.value !== search?.defaultValue);
+  pageTransition = {
+    navigate,
+    keepDrawer: headers["X-Otoha-Keep-Drawer"] === "1",
+    home: elt?.closest('[data-nav-path="/"]'),
+    searchDraft: preserveSearch ? search?.value : undefined,
+    openSections: [...detail.target.querySelectorAll(".settings-page details[id][open]")].map(({ id }) => id),
+    previousTab: state.tab,
+  };
+  rememberASMR18Draft();
+  closeDropdown(true);
+});
+
+document.addEventListener("htmx:afterSwap", ({ detail }) => {
+  const { target } = detail;
+  if (target.id === "drawer-region") {
+    afterDrawerSwap(target);
+    return;
+  }
+  if (target.id !== "page-content") return;
+
+  const transition = pageTransition;
+  pageTransition = null;
+  const newTab = target.querySelector("[data-page-tab]")?.dataset.pageTab ?? state.tab;
+  if (transition?.navigate) {
+    document.querySelector(".main-pane").scrollTop = 0;
+    if (!transition.keepDrawer && (transition.home || transition.previousTab !== newTab)) closeWorkDrawer();
+    if (transition.previousTab !== newTab) closePlaylistPicker();
+  }
+  restoreASMR18Draft();
+  for (const id of transition?.openSections ?? []) {
+    const section = document.getElementById(id);
+    if (section) section.open = true;
+  }
+  const search = document.getElementById("search-input");
+  if (search && transition?.searchDraft !== undefined && search.defaultValue !== transition.searchDraft) {
+    search.value = transition.searchDraft;
+  }
+  syncPage();
+});
+
+document.addEventListener("htmx:historyRestore", () => {
+  closeWorkDrawer();
+  closePlaylistPicker();
+  restoreASMR18Draft();
+  syncPage();
+});
+
+document.addEventListener("htmx:responseError", ({ detail }) => {
+  if (detail.target.id === "drawer-region") return;
+  reportRequestError(new Error(`请求失败（HTTP ${detail.xhr.status}）`));
+});
 
 function bindPlayerInputs() {
+  document.getElementById("player-chapter")?.addEventListener("change", (e) => {
+    if (e.target.value !== "") {
+      seekTrack(Number(e.target.value));
+      e.target.value = "";
+    }
+  });
+  document.getElementById("player-seek")?.addEventListener("input", (e) => {
+    const seek = e.target;
+    seek.style.setProperty("--played", `${100 * Number(seek.value) / Number(seek.max)}%`);
+    document.getElementById("player-elapsed").textContent = Number(seek.value) ? fmtSec(Number(seek.value)) : "00:00";
+  });
   document.getElementById("player-seek")?.addEventListener("change", (e) => {
-    audio.currentTime = Number(e.target.value);
+    seekTrack(Number(e.target.value));
   });
   document.getElementById("player-rate")?.addEventListener("change", (e) => {
-    const r = Number(e.target.value) || 1.0;
-    state.player.playbackRate = r;
-    audio.playbackRate = r;
+    accumulateListened();
+    state.player.playbackRate = Number(e.target.value);
+    audio.playbackRate = state.player.playbackRate;
+  });
+  document.getElementById("player-volume")?.addEventListener("input", (e) => {
+    audio.volume = Number(e.target.value) / 100;
+    audio.muted = false;
+    if (audio.volume > 0) lastAudibleVolume = audio.volume;
+    syncVolumeControl();
   });
 }
 
-function bindEvents() {
-  document.getElementById("search-form")?.addEventListener("submit", (e) => {
-    e.preventDefault();
-    state.query = document.getElementById("search-input").value;
-    state.page = 1;
-    state.tab = "works";
-    loadWorks();
-  });
+function syncVolumeControl() {
+  const volumeButton = document.querySelector('[data-action="toggle-mute"]');
+  const volumeSlider = document.getElementById("player-volume");
+  const muted = audio.muted || audio.volume === 0;
+  const label = muted ? "取消静音" : "静音";
+  if (volumeButton.getAttribute("aria-label") !== label) {
+    volumeButton.setAttribute("aria-label", label);
+    volumeButton.setAttribute("aria-pressed", String(muted));
+    volumeButton.title = label;
+    volumeButton.innerHTML = icon(muted ? "volume-off" : "volume");
+  }
+  volumeSlider.value = String(Math.round(audio.volume * 100));
+  volumeSlider.style.setProperty("--played", `${muted ? 0 : audio.volume * 100}%`);
+}
 
-  document.getElementById("filter-age")?.addEventListener("change", (e) => {
-    state.ageMode = e.target.value;
-    state.page = 1;
-    loadWorks();
-    loadFacets();
-    loadRecent();
-  });
-  document.getElementById("filter-progress")?.addEventListener("change", (e) => {
-    state.progress = e.target.value;
-    state.page = 1;
-    loadWorks();
-  });
-  document.getElementById("filter-circle")?.addEventListener("change", (e) => {
-    state.circle = e.target.value;
-    state.page = 1;
-    loadWorks();
-  });
-  document.getElementById("filter-va")?.addEventListener("change", (e) => {
-    state.va = e.target.value;
-    state.page = 1;
-    loadWorks();
-  });
-  document.getElementById("filter-tag")?.addEventListener("change", (e) => {
-    state.tag = e.target.value;
-    state.page = 1;
-    loadWorks();
-  });
-  document.getElementById("filter-sort")?.addEventListener("change", (e) => {
-    state.sortBy = e.target.value;
-    state.page = 1;
-    loadWorks();
-  });
-
-  document.getElementById("import-meta-file")?.addEventListener("change", async (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    const txt = await f.text();
-    const res = await api("/api/import/metadata", {
+document.addEventListener("change", async (event) => {
+  if (event.target.id.startsWith("asmr18-")) rememberASMR18Draft();
+  if (event.target.id !== "import-meta-file") return;
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try {
+    const result = await api("/api/import/metadata", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: txt,
+      body: await file.text(),
     });
-    alert(`已导入 ${res.imported} 部作品元数据`);
-    loadWorks();
-  });
+    notify(`已导入 ${result.imported} 部作品元数据`, { tone: "success" });
+    await refreshPage();
+  } catch (error) {
+    reportRequestError(error);
+  } finally {
+    event.target.value = "";
+  }
+});
+
+function focusLibraryForm() {
+  document.querySelector("[data-library-autofocus]")?.focus({ preventScroll: true });
+}
+
+document.addEventListener("submit", (event) => {
+  const form = event.target;
+  if (!form.matches("[data-library-form]")) return;
+  event.preventDefault();
+  if (handleLibraryForm(form)) {
+    render();
+    focusLibraryForm();
+  }
+});
+
+window.addEventListener("storage", (event) => {
+  if (refreshLibrary(event.key)) render();
+});
+
+function isWorkDrawerBackground(target) {
+  return Boolean(target.closest(".workspace, .sidebar")) &&
+    !target.closest(".drawer, .dropdown, .search-box, button, a, input, select, textarea, label, summary, [contenteditable]");
 }
 
 document.addEventListener("click", async (e) => {
+  if (e.target.closest("a.dlsite-link")) return;
   const target = e.target.closest("[data-action]");
-  if (!target) return;
+  if (!target) {
+    if (state.detail && isWorkDrawerBackground(e.target)) closeWorkDrawer();
+    return;
+  }
   const act = target.dataset.action;
 
   try {
+    if (handleLibraryAction(target)) {
+      render();
+      focusLibraryForm();
+      return;
+    }
     switch (act) {
-      case "switch-tab": {
-        state.tab = target.dataset.tab;
-        if (state.tab === "works") {
-          await Promise.all([loadWorks(), loadRecent()]);
-        } else if (state.tab === "history") {
-          await loadHistoryTab();
-        } else if (state.tab === "settings") {
-          await loadSettingsTab();
-        }
+      case "toggle-sidebar":
+        state.sidebarCollapsed = !state.sidebarCollapsed;
+        savePreference("sidebar", state.sidebarCollapsed ? "collapsed" : "expanded");
+        syncSidebarPresentation();
         break;
-      }
-      case "set-view":
-        state.viewMode = target.dataset.mode;
+      case "toggle-sidebar-visibility":
+        state.sidebarHidden = !state.sidebarHidden;
+        savePreference("sidebar-hidden", String(state.sidebarHidden));
+        syncSidebarPresentation();
+        break;
+      case "toggle-theme":
+        state.theme = state.theme === "dark" ? "light" : "dark";
+        savePreference("theme", state.theme);
         render();
-        break;
-      case "toggle-sub-only":
-        state.subtitleOnly = !state.subtitleOnly;
-        state.page = 1;
-        await loadWorks();
-        break;
-      case "reset-filters":
-        state.query = "";
-        state.circle = "";
-        state.va = "";
-        state.tag = "";
-        state.progress = "";
-        state.subtitleOnly = false;
-        state.page = 1;
-        await loadWorks();
-        break;
-      case "prev-page":
-        if (state.page > 1) {
-          state.page--;
-          await loadWorks();
-        }
-        break;
-      case "next-page":
-        state.page++;
-        await loadWorks();
         break;
       case "open-work":
         await openWorkDrawer(target.dataset.workno);
         break;
       case "close-drawer":
-        state.selectedWorkno = "";
-        state.detail = null;
-        render();
+        closeWorkDrawer();
         break;
       case "filter-circle":
-        e.preventDefault();
-        state.circle = target.dataset.val;
-        state.page = 1;
-        await loadWorks();
-        break;
       case "filter-va":
+      case "filter-tag": {
         e.preventDefault();
-        state.va = target.dataset.val;
-        state.page = 1;
-        await loadWorks();
+        const facet = act.slice("filter-".length);
+        const keepDrawer = Boolean(target.closest(".drawer"));
+        const query = state.tab === "works"
+          ? new URLSearchParams(location.search)
+          : new URLSearchParams(state.browseQuery);
+        if (query.get(facet) === target.dataset.val) query.delete(facet);
+        else query.set(facet, target.dataset.val);
+        query.delete("page");
+        await requestPage(`/?${query}`, { navigate: true, keepDrawer });
         break;
-      case "filter-tag":
-        e.preventDefault();
-        state.tag = target.dataset.val;
-        state.page = 1;
-        await loadWorks();
+      }
+      case "toggle-favorite": {
+        const workno = target.dataset.workno;
+        const work = target.dataset.work
+          ? JSON.parse(target.dataset.work)
+          : getFavorites().find((favorite) => favorite.workno === workno);
+        if (!work) return;
+        toggleFavorite(work);
+        render();
         break;
+      }
+      case "playlist-add-track": {
+        const work = state.detail;
+        const track = work?.tracks?.find(({ id }) => id === Number(target.dataset.trackId));
+        if (track) {
+          showPlaylistPicker({ ...track, workno: work.workno, workTitle: work.title, workVas: work.vas });
+          render();
+        }
+        break;
+      }
+      case "playlist-play": {
+        const playlist = getPlaylist(target.dataset.playlistId);
+        if (playlist?.tracks.length) {
+          const index = target.dataset.trackId
+            ? playlist.tracks.findIndex(({ id }) => id === Number(target.dataset.trackId))
+            : Number(target.dataset.index);
+          if (index >= 0) await playSavedQueue(playlist.tracks, index);
+        }
+        break;
+      }
       case "toggle-folder": {
         const k = target.dataset.folderKey;
         state.collapsedFolders[k] = !state.collapsedFolders[k];
@@ -1330,65 +1750,116 @@ document.addEventListener("click", async (e) => {
         break;
       }
       case "play-track":
-        startPlayFromTree(Number(target.dataset.trackId), target.dataset.folderRel || "");
+        await startPlayFromTree(Number(target.dataset.trackId), target.dataset.folderRel || "");
         break;
       case "player-toggle":
         if (!state.player.track) return;
-        if (audio.paused) await audio.play();
+        if (state.player.error) await playQueueIndex(state.player.queueIndex, state.player.currentTime);
+        else if (audio.paused) await resumeTrack();
         else audio.pause();
         break;
+      case "toggle-player-collapse":
+        togglePlayerCollapse();
+        break;
       case "player-prev":
-        playQueueIndex(state.player.queueIndex - 1, 0);
+        await playQueueIndex(state.player.queueIndex - 1, 0);
         break;
       case "player-next":
-        playQueueIndex(state.player.queueIndex + 1, 0);
+        await playQueueIndex(state.player.queueIndex + 1, 0);
         break;
-      case "toggle-incognito":
-        state.player.incognito = !state.player.incognito;
+      case "player-queue-track": {
+        const index = Number(target.dataset.index);
+        if (index !== state.player.queueIndex) await playQueueIndex(index, 0);
+        else if (audio.paused) {
+          if (state.player.error) await playQueueIndex(index, state.player.currentTime);
+          else await resumeTrack();
+        }
+        break;
+      }
+      case "toggle-queue":
+        if (state.player.sleepMenuOpen) closePlayerOverlay(false);
+        setQueueOpen(!state.player.queueOpen);
+        break;
+      case "toggle-player-subtitles":
+        state.player.showSubtitles = !state.player.showSubtitles;
         renderPlayerOnly();
         break;
-      case "save-state":
-      case "change-state": {
+      case "toggle-sleep-menu":
+        setQueueOpen(false, false);
+        state.player.sleepMenuOpen = !state.player.sleepMenuOpen;
+        renderPlayerOnly();
+        break;
+      case "set-sleep-timer":
+        setSleepTimer(Number(target.dataset.minutes));
+        renderPlayerOnly();
+        document.querySelector('[data-action="toggle-sleep-menu"]')?.focus({ preventScroll: true });
+        break;
+      case "toggle-mute": {
+        const muted = audio.muted || audio.volume === 0;
+        if (muted && audio.volume === 0) audio.volume = lastAudibleVolume;
+        audio.muted = !muted;
+        syncVolumeControl();
+        break;
+      }
+      case "toggle-incognito": {
+        const heartbeat = sendHeartbeat(false);
+        state.player.incognito = !state.player.incognito;
+        renderPlayerOnly();
+        await heartbeat;
+        break;
+      }
+      case "save-state": {
         if (!state.detail) return;
+        const { workno } = state.detail;
+        const requestId = drawerRequestId;
         const progress = document.getElementById("state-progress").value;
         const rating = Number(document.getElementById("state-rating").value) || 0;
         const review = document.getElementById("state-review").value;
-        await api(`/api/works/${encodeURIComponent(state.detail.workno)}/state`, {
+        await api(`/api/works/${encodeURIComponent(workno)}/state`, {
           method: "POST",
           body: { progress, rating, review },
         });
-        await openWorkDrawer(state.detail.workno);
-        await loadWorks();
+        if (isCurrentWorkDrawer(workno, requestId)) {
+          await openWorkDrawer(workno, { edit: Boolean(document.getElementById("meta-title")), preserveInput: true });
+        }
+        await refreshWorks();
         break;
       }
       case "save-user-tags": {
         if (!state.detail) return;
+        const { workno } = state.detail;
+        const requestId = drawerRequestId;
         const raw = document.getElementById("user-tags-input").value;
         const tags = raw
           .split(/[,，]/)
           .map((s) => s.trim())
           .filter(Boolean);
-        await api(`/api/works/${encodeURIComponent(state.detail.workno)}/tags`, {
+        await api(`/api/works/${encodeURIComponent(workno)}/tags`, {
           method: "POST",
           body: { tags },
         });
-        await openWorkDrawer(state.detail.workno);
-        await loadFacets();
+        if (isCurrentWorkDrawer(workno, requestId)) {
+          await openWorkDrawer(workno, { edit: Boolean(document.getElementById("meta-title")), preserveInput: true });
+        }
+        await refreshWorks();
         break;
       }
       case "toggle-edit-meta":
-        state.editingMeta = !state.editingMeta;
-        render();
+        if (state.detail) {
+          await openWorkDrawer(state.detail.workno, { edit: !document.getElementById("meta-title"), preserveInput: true });
+        }
         break;
       case "save-meta": {
         if (!state.detail) return;
+        const { workno } = state.detail;
+        const requestId = drawerRequestId;
         const splitCSV = (id) =>
           document
             .getElementById(id)
             .value.split(/[,，]/)
             .map((s) => s.trim())
             .filter(Boolean);
-        await api(`/api/works/${encodeURIComponent(state.detail.workno)}/metadata`, {
+        await api(`/api/works/${encodeURIComponent(workno)}/metadata`, {
           method: "PUT",
           body: {
             title: document.getElementById("meta-title").value,
@@ -1399,35 +1870,56 @@ document.addEventListener("click", async (e) => {
             tags: splitCSV("meta-tags"),
           },
         });
-        state.editingMeta = false;
-        await openWorkDrawer(state.detail.workno);
-        await loadWorks();
+        if (isCurrentWorkDrawer(workno, requestId)) await openWorkDrawer(workno);
+        await refreshWorks();
         break;
       }
       case "scrape-work":
+      case "sync-work-tracks": {
         if (!state.detail) return;
-        await api(`/api/works/${encodeURIComponent(state.detail.workno)}/scrape`, { method: "POST" });
-        await openWorkDrawer(state.detail.workno);
-        await loadWorks();
+        const { workno } = state.detail;
+        const requestId = drawerRequestId;
+        const operation = act === "scrape-work" ? "scrape" : "sync-tracks";
+        await api(`/api/works/${encodeURIComponent(workno)}/${operation}`, { method: "POST" });
+        if (isCurrentWorkDrawer(workno, requestId)) await openWorkDrawer(workno);
+        await refreshWorks();
         break;
-      case "sync-work-tracks":
-        if (!state.detail) return;
-        await api(`/api/works/${encodeURIComponent(state.detail.workno)}/sync-tracks`, { method: "POST" });
-        await openWorkDrawer(state.detail.workno);
-        await loadWorks();
-        break;
+      }
       case "jump-edition": {
-        const wno = target.dataset.workno;
-        if (!wno) break;
+        const workno = target.dataset.workno;
+        const requestId = drawerRequestId + 1;
         try {
-          await openWorkDrawer(wno);
-        } catch (_) {
-          await api(`/api/works/${encodeURIComponent(wno)}/scrape`, { method: "POST" });
-          await openWorkDrawer(wno);
-          await loadWorks();
+          await openWorkDrawer(workno);
+        } catch (error) {
+          if (error.status !== 404) throw error;
+          await api(`/api/works/${encodeURIComponent(workno)}/scrape`, { method: "POST" });
+          if (drawerRequestId === requestId) await openWorkDrawer(workno);
+          await refreshWorks();
         }
         break;
       }
+      case "asmr18-preview":
+      case "asmr18-import": {
+        const urls = document.getElementById("asmr18-urls").value.split(/\s+/).filter(Boolean);
+        if (!urls.length) throw new Error("请先填写 ASMR18 作品页面地址");
+        await api("/api/asmr18/sync", {
+          method: "POST",
+          body: { ...asmr18Options(), urls, max_works: 0, dry_run: act === "asmr18-preview", refresh: true },
+        });
+        break;
+      }
+      case "asmr18-latest":
+        await api("/api/asmr18/sync", {
+          method: "POST",
+          body: {
+            ...asmr18Options(),
+            category: document.getElementById("asmr18-category").value,
+            max_pages: 1,
+            max_works: 24,
+            refresh: document.getElementById("asmr18-refresh").checked,
+          },
+        });
+        break;
       case "sync-asmrone-full":
         await api("/api/asmrone/sync", {
           method: "POST",
@@ -1440,43 +1932,25 @@ document.addEventListener("click", async (e) => {
           body: { page_size: 100, order: "create_date", sort: "desc", max_pages: 2, reset_checkpoint: true },
         });
         break;
-      case "resume-recent": {
-        const entry = state.recent.find((r) => r.workno === target.dataset.workno);
-        if (entry) await resumeFromHistory(entry);
-        break;
-      }
+      case "resume-recent":
       case "resume-history": {
-        const entry = state.historyItems.find((h) => h.id === Number(target.dataset.id));
-        if (entry) {
-          state.tab = "works";
-          await resumeFromHistory(entry);
+        const entry = JSON.parse(target.dataset.entry);
+        if (act === "resume-history") {
+          await requestPage("/" + state.browseQuery, { navigate: true, keepDrawer: true });
         }
+        await resumeFromHistory(entry);
         break;
       }
-      case "delete-history":
-        await api(`/api/history/${target.dataset.id}`, { method: "DELETE" });
-        await loadHistoryTab();
-        break;
-      case "clear-history-days":
-        await api(`/api/history?days=${target.dataset.days}`, { method: "DELETE" });
-        await loadHistoryTab();
-        break;
-      case "clear-history-all":
-        if (!confirm("确认清空全部收听历史并执行 SQLite VACUUM 彻底擦除磁盘残留？")) return;
-        await api("/api/history", { method: "DELETE" });
-        state.recent = [];
-        await loadHistoryTab();
-        break;
       case "add-storage": {
         const name = document.getElementById("new-st-name").value.trim();
         const root = document.getElementById("new-st-root").value.trim();
         await api("/api/storages", { method: "POST", body: { kind: "local", name, root } });
-        await loadSettingsTab();
+        await refreshSettings();
         break;
       }
       case "delete-storage":
         await api(`/api/storages/${target.dataset.id}`, { method: "DELETE" });
-        await loadSettingsTab();
+        await refreshSettings();
         break;
       case "scan-storage":
         await api("/api/scan", { method: "POST", body: { storage_id: Number(target.dataset.id), scrape_metadata: false } });
@@ -1484,15 +1958,17 @@ document.addEventListener("click", async (e) => {
       case "scan-all":
         await api("/api/scan", { method: "POST", body: { storage_id: 0, scrape_metadata: target.dataset.scrape === "1" } });
         break;
+      case "show-task-status":
+        showTaskNotification(state.task);
+        if (target.matches(":focus-visible")) taskNotification.focus();
+        break;
       case "cancel-task":
         await api("/api/tasks/cancel", { method: "POST" });
         break;
       case "reindex-bleve": {
         const res = await api("/api/search/reindex", { method: "POST" });
-        state.searchDegraded = false;
-        state.searchWarning = "";
-        alert(`索引重建完成：共索引 ${res.indexed} 部作品`);
-        render();
+        notify(`索引重建完成，共索引 ${res.indexed} 部作品`, { tone: "success" });
+        await refreshWorks();
         break;
       }
       case "save-settings": {
@@ -1511,11 +1987,14 @@ document.addEventListener("click", async (e) => {
           auth_enabled: document.getElementById("cfg-auth").checked,
         };
         const saved = await api("/api/settings", { method: "PUT", body });
-        state.settings = saved;
+        if (saved.auth_enabled !== Boolean(document.querySelector('[data-action="logout"]'))) {
+          location.reload();
+          break;
+        }
         state.heartbeatIntervalSec = saved.heartbeat_interval_sec;
         resetHeartbeatTimer();
-        alert("设置已保存");
-        await bootstrap();
+        notify("设置已保存", { tone: "success" });
+        await refreshSettings();
         break;
       }
       case "create-user": {
@@ -1523,17 +2002,19 @@ document.addEventListener("click", async (e) => {
         const password = document.getElementById("new-user-pwd").value;
         const is_admin = document.getElementById("new-user-admin").checked;
         await api("/api/users", { method: "POST", body: { username, password, is_admin } });
-        await loadSettingsTab();
+        await refreshSettings();
         break;
       }
       case "logout":
+        await resetPlayer();
         await api("/api/auth/logout", { method: "POST" });
-        await bootstrap();
+        sseSource?.close();
+        location.assign("/");
         break;
     }
   } catch (err) {
-    alert(err.message);
+    notify(err.message, { tone: "error" });
   }
 });
 
-bootstrap();
+startApp();

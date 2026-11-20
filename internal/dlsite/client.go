@@ -32,17 +32,19 @@ type MetadataFallback interface {
 
 // ClientOptions configures the DLsite metadata client (§3.2, §3.3, §9).
 type ClientOptions struct {
-	BaseURL        string
-	Locale         string
-	UserAgent      string
-	ProxyURL       string
-	MinInterval    time.Duration
-	RequestTimeout time.Duration
-	MaxRetries     int
-	RetryBaseDelay time.Duration
-	Cache          *Cache
-	CoversDir      string
-	Fallback       MetadataFallback
+	BaseURL          string
+	Locale           string
+	UserAgent        string
+	ProxyURL         string
+	MinInterval      time.Duration
+	RequestTimeout   time.Duration
+	MaxRetries       int
+	RetryBaseDelay   time.Duration
+	Cache            *Cache
+	CoversDir        string
+	Fallback         MetadataFallback
+	Transport        http.RoundTripper // shared transport for aggregate request limits
+	CompleteMetadata bool              // consult all configured metadata sources
 }
 
 // Client fetches public DLsite metadata serially with rate limiting, proxy auth, and disk caching.
@@ -137,9 +139,13 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	if opts.RetryBaseDelay <= 0 {
 		opts.RetryBaseDelay = 1 * time.Second
 	}
-	tr, err := BuildHTTPTransport(opts.ProxyURL)
-	if err != nil {
-		return nil, err
+	tr := opts.Transport
+	if tr == nil {
+		var err error
+		tr, err = BuildHTTPTransport(opts.ProxyURL)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &Client{
 		opts: opts,
@@ -272,8 +278,9 @@ func (c *Client) Fetch(ctx context.Context, workno string, force bool) (*Metadat
 
 	localeParam := FormatLocaleParam(c.opts.Locale)
 	meta, err := c.fetchProductJSON(ctx, wno, localeParam)
-	if err != nil && !errors.Is(err, ErrWorkNotFound) && ctx.Err() == nil {
-		// Tier-1 network/format glitch: try Tier-3 HTML before failing
+	if err != nil && ctx.Err() == nil {
+		// Some live products are absent from product.json. Consult the product
+		// page before treating an empty JSON response as a missing work.
 		htmlMeta, htmlErr := c.fetchHTML(ctx, wno, c.opts.Locale)
 		if htmlErr == nil {
 			meta = htmlMeta
@@ -309,8 +316,8 @@ func (c *Client) Fetch(ctx context.Context, workno string, force bool) (*Metadat
 
 	meta.Locale = localeParam
 
-	// Translated work fallback (§13: translated works often omit VAs/circle/series)
-	if meta.OriginalWorkno != "" && (len(meta.VAs) == 0 || meta.CircleName == "" || meta.SeriesName == "") {
+	// Translated editions can omit shared voice and series credits (§13).
+	if meta.OriginalWorkno != "" && (len(meta.VAs) == 0 || meta.SeriesName == "") {
 		if origMeta, origErr := c.fetchProductJSON(ctx, meta.OriginalWorkno, localeParam); origErr == nil {
 			MergeFallbackMetadata(meta, origMeta)
 		}
@@ -335,8 +342,9 @@ func (c *Client) Fetch(ctx context.Context, workno string, force bool) (*Metadat
 		}
 	}
 
-	// Tier-3: HTML fallback if critical static fields (Title or VAs+Tags) are still missing
-	if meta.Title == "" || (len(meta.VAs) == 0 && len(meta.Tags) == 0) {
+	// Tier-3: JSON can contain credits while omitting the release date or other
+	// static fields. Those omissions also require checking the product page.
+	if missingStaticMetadata(meta) {
 		if htmlMeta, htmlErr := c.fetchHTML(ctx, wno, c.opts.Locale); htmlErr == nil {
 			if meta.Title == "" {
 				meta.Title = htmlMeta.Title
@@ -346,7 +354,7 @@ func (c *Client) Fetch(ctx context.Context, workno string, force bool) (*Metadat
 	}
 
 	// Tier-4: asmr.one fills gaps DLsite left (common for delisted or translated works).
-	if meta.Title == "" || len(meta.VAs) == 0 || len(meta.Tags) == 0 {
+	if c.opts.CompleteMetadata || missingStaticMetadata(meta) || len(meta.VAs) == 0 || len(meta.Tags) == 0 {
 		if fb := c.tryFallback(ctx, wno); fb != nil {
 			if meta.Title == "" {
 				meta.Title = fb.Title
@@ -363,24 +371,34 @@ func (c *Client) Fetch(ctx context.Context, workno string, force bool) (*Metadat
 	return meta, nil
 }
 
+func missingStaticMetadata(meta *Metadata) bool {
+	return meta.Title == "" || meta.ReleaseDate == "" || meta.CircleID == "" ||
+		meta.CircleName == "" || meta.WorkType == "" || meta.AgeCategory == AgeUnknown ||
+		meta.CoverURL == "" || meta.FileSize == 0 || (len(meta.VAs) == 0 && len(meta.Tags) == 0)
+}
+
 func (c *Client) tryFallback(ctx context.Context, wno string) *Metadata {
 	if c.opts.Fallback == nil || ctx.Err() != nil {
 		return nil
 	}
 	fb, err := c.opts.Fallback.Fetch(ctx, wno)
-	if err != nil || fb == nil || fb.Title == "" {
+	if err != nil || fb == nil || fb.Title == "" || NormalizeWorkno(fb.Workno) != wno {
 		return nil
 	}
 	return fb
 }
 
 func (c *Client) fetchHTML(ctx context.Context, workno, locale string) (*Metadata, error) {
-	u := fmt.Sprintf("%s/maniax/work/=/product_id/%s.html", c.opts.BaseURL, url.QueryEscape(workno))
-	body, err := c.getBytes(ctx, u, FormatLocaleCookie(locale))
+	body, err := c.getWorkHTML(ctx, workno, locale)
 	if err != nil {
 		return nil, err
 	}
 	return ParseWorkHTML(body, workno)
+}
+
+func (c *Client) getWorkHTML(ctx context.Context, workno, locale string) ([]byte, error) {
+	u := fmt.Sprintf("%s/maniax/work/=/product_id/%s.html", c.opts.BaseURL, url.QueryEscape(workno))
+	return c.getBytes(ctx, u, FormatLocaleCookie(locale))
 }
 
 // DownloadCover downloads coverURL to <CoversDir>/<workno>.jpg if not already downloaded.
@@ -416,12 +434,12 @@ func (c *Client) DownloadCover(ctx context.Context, workno, coverURL string) (st
 
 // BatchProgress reports batch scrape progress for CLI and SSE listeners.
 type BatchProgress struct {
-	Current   int
-	Total     int
-	Workno    string
-	Status    string // "cached" | "ok" | "not_found" | "error"
-	Meta      *Metadata
-	Err       error
+	Current int
+	Total   int
+	Workno  string
+	Status  string // "cached" | "ok" | "not_found" | "error"
+	Meta    *Metadata
+	Err     error
 }
 
 // ScrapeBatch scrapes a list of worknos serially with checkpointing so interruption (ctx cancel)

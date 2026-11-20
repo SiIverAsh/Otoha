@@ -52,6 +52,7 @@ type Work struct {
 	SamCoverURL       string   `json:"sam_cover_url,omitempty"`
 	ThumbnailCoverURL string   `json:"thumbnail_cover_url,omitempty"`
 	OriginalWorkno    string   `json:"original_workno,omitempty"`
+	SourceURL         string   `json:"source_url,omitempty"`
 	NeedsRescrape     bool     `json:"needs_rescrape"`
 	ScrapedAt         int64    `json:"scraped_at"`
 	CreatedAt         int64    `json:"created_at"`
@@ -76,23 +77,33 @@ type WorkPath struct {
 	RelPath     string `json:"rel_path"`
 }
 
+type Chapter struct {
+	Title string  `json:"title"`
+	Start float64 `json:"start"`
+}
+
 type Track struct {
-	ID           int64    `json:"id"`
-	Workno       string   `json:"workno"`
-	StorageID    int64    `json:"storage_id"`
-	WorkRel      string   `json:"work_rel"`
-	RelPath      string   `json:"rel_path"`
-	Size         int64    `json:"size"`
-	Duration     *float64 `json:"duration"`
-	Ord          int      `json:"ord"`
-	PlayPosition float64  `json:"play_position"`
-	HasSubtitle  bool     `json:"has_subtitle"`
-	StreamURL    string   `json:"stream_url,omitempty"`
-	DownloadURL  string   `json:"download_url,omitempty"`
-	StreamLowURL string   `json:"stream_low_url,omitempty"`
-	SubtitleURL  string   `json:"subtitle_url,omitempty"`
-	RemoteHash   string   `json:"remote_hash,omitempty"`
-	IsRemote     bool     `json:"is_remote,omitempty"`
+	Title         string    `json:"title,omitempty"`
+	Chapters      []Chapter `json:"chapters,omitempty"`
+	SourceTrackID *int64    `json:"source_track_id,omitempty"`
+	StartSeconds  *float64  `json:"start_seconds,omitempty"`
+	EndSeconds    *float64  `json:"end_seconds,omitempty"`
+	ID            int64     `json:"id"`
+	Workno        string    `json:"workno"`
+	StorageID     int64     `json:"storage_id"`
+	WorkRel       string    `json:"work_rel"`
+	RelPath       string    `json:"rel_path"`
+	Size          int64     `json:"size"`
+	Duration      *float64  `json:"duration"`
+	Ord           int       `json:"ord"`
+	PlayPosition  float64   `json:"play_position"`
+	HasSubtitle   bool      `json:"has_subtitle"`
+	StreamURL     string    `json:"stream_url,omitempty"`
+	DownloadURL   string    `json:"download_url,omitempty"`
+	StreamLowURL  string    `json:"stream_low_url,omitempty"`
+	SubtitleURL   string    `json:"subtitle_url,omitempty"`
+	RemoteHash    string    `json:"remote_hash,omitempty"`
+	IsRemote      bool      `json:"is_remote,omitempty"`
 }
 
 type TrackTreeNode struct {
@@ -112,10 +123,19 @@ type UserState struct {
 	UpdatedAt int64  `json:"updated_at"`
 }
 
+// OriginalWork describes the registered original edition for a translation.
+type OriginalWork struct {
+	Workno     string `json:"workno"`
+	Title      string `json:"title"`
+	CircleID   string `json:"circle_id"`
+	CircleName string `json:"circle_name"`
+}
+
 type WorkDetail struct {
+	ASMR18SourceURL string `json:"asmr18_source_url,omitempty"`
 	Work
+	OriginalWork         *OriginalWork    `json:"original_work,omitempty"`
 	SourceType           string           `json:"source_type,omitempty"`
-	SourceURL            string           `json:"source_url,omitempty"`
 	WorkAttributes       string           `json:"work_attributes,omitempty"`
 	LanguageEditionsJSON string           `json:"language_editions_json,omitempty"`
 	OtherEditionsJSON    string           `json:"other_editions_json,omitempty"`
@@ -166,21 +186,31 @@ type HistoryEntry struct {
 	QueueCtx    string  `json:"queue_ctx"`
 }
 
+// WorkSource identifies a provider linked to a library work.
+type WorkSource string
+
+const (
+	AllWorkSources WorkSource = ""
+	ASMRoneSource  WorkSource = "asmrone"
+	ASMR18Source   WorkSource = "asmr18"
+)
+
 type ListWorksOptions struct {
-	UserID    int64
-	Page      int
-	PageSize  int
-	SortBy    string // "release_date" | "created_at" | "dl_count" | "rating" | "price" | "workno" | "title"
-	SortDesc  bool
-	AgeMode   string // "general" (age=1) | "sfw_unrated" (age in 0,1) | "r15" (age<=2) | "r18" (age=3) | "all"
-	Circle    string
-	VA        string
-	Tag       string
+	UserID       int64
+	Page         int
+	PageSize     int
+	SortBy       string // "release_date" | "created_at" | "dl_count" | "rating" | "price" | "workno" | "title"
+	SortDesc     bool
+	AgeMode      string // "general" (age=1) | "sfw_unrated" (age in 0,1) | "r15" (age<=2) | "r18" (age=3) | "all"
+	Source       WorkSource
+	Circle       string
+	VA           string
+	Tag          string
 	Progress     string
 	StorageID    int64
 	SubtitleOnly bool
 	Worknos      []string // optional explicit workno set from Bleve search
-	QueryLike string   // optional degraded SQL LIKE search
+	QueryLike    string   // optional degraded SQL LIKE search
 }
 
 // Store wraps the pure-Go modernc.org/sqlite database.
@@ -647,22 +677,26 @@ func buildAgeCondition(alias, ageMode string) string {
 	}
 }
 
-// ListWorks lists works with filtering, age isolation, sorting, and pagination.
-func (s *Store) ListWorks(ctx context.Context, opts ListWorksOptions) ([]Work, int, error) {
-	if opts.UserID <= 0 {
-		opts.UserID = 1
+func workScopeCondition(ageMode string, source WorkSource) string {
+	ageCondition := buildAgeCondition("w", ageMode)
+	switch source {
+	case ASMRoneSource:
+		return ageCondition + ` AND (w.asmrone_id > 0 OR EXISTS (
+			SELECT 1 FROM track tr JOIN storage st ON st.id = tr.storage_id
+			WHERE tr.workno = w.workno AND st.kind = 'asmrone'
+		))`
+	case ASMR18Source:
+		return ageCondition + ` AND EXISTS (
+			SELECT 1 FROM asmr18_work aw WHERE aw.workno = w.workno
+		)`
+	default:
+		return ageCondition
 	}
-	if opts.Page <= 0 {
-		opts.Page = 1
-	}
-	if opts.PageSize <= 0 || opts.PageSize > 200 {
-		opts.PageSize = 40
-	}
+}
 
-	var where []string
+func workFilter(opts ListWorksOptions) (string, []any) {
+	where := []string{workScopeCondition(opts.AgeMode, opts.Source)}
 	var args []any
-
-	where = append(where, buildAgeCondition("w", opts.AgeMode))
 
 	if opts.Circle != "" {
 		where = append(where, `(w.circle_name = ? OR w.circle_id = ?)`)
@@ -699,7 +733,7 @@ func (s *Store) ListWorks(ctx context.Context, opts ListWorksOptions) ([]Work, i
 	}
 	if opts.Worknos != nil {
 		if len(opts.Worknos) == 0 {
-			return []Work{}, 0, nil
+			return "0 = 1", nil
 		}
 		ph := make([]string, len(opts.Worknos))
 		for i, wno := range opts.Worknos {
@@ -718,7 +752,40 @@ func (s *Store) ListWorks(ctx context.Context, opts ListWorksOptions) ([]Work, i
 		args = append(args, like, like, like, like, like, like)
 	}
 
-	whereSQL := strings.Join(where, " AND ")
+	return strings.Join(where, " AND "), args
+}
+
+// ListMatchingWorknos returns unpaginated work IDs for restricting indexed search.
+func (s *Store) ListMatchingWorknos(ctx context.Context, opts ListWorksOptions) ([]string, error) {
+	whereSQL, args := workFilter(opts)
+	rows, err := s.db.QueryContext(ctx, "SELECT w.workno FROM work w WHERE "+whereSQL, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	worknos := []string{}
+	for rows.Next() {
+		var workno string
+		if err := rows.Scan(&workno); err != nil {
+			return nil, err
+		}
+		worknos = append(worknos, workno)
+	}
+	return worknos, rows.Err()
+}
+
+// ListWorks lists works with filtering, age isolation, sorting, and pagination.
+func (s *Store) ListWorks(ctx context.Context, opts ListWorksOptions) ([]Work, int, error) {
+	if opts.UserID <= 0 {
+		opts.UserID = 1
+	}
+	if opts.Page <= 0 {
+		opts.Page = 1
+	}
+	if opts.PageSize <= 0 || opts.PageSize > 200 {
+		opts.PageSize = 40
+	}
+	whereSQL, args := workFilter(opts)
 
 	var total int
 	countQuery := "SELECT COUNT(*) FROM work w WHERE " + whereSQL
@@ -762,10 +829,11 @@ func (s *Store) ListWorks(ctx context.Context, opts ListWorksOptions) ([]Work, i
 			COALESCE(w.rating, 0), COALESCE(w.rate_count, 0),
 			COALESCE(w.review_count, 0), COALESCE(w.dl_count, 0), COALESCE(w.cover_path, ''),
 			COALESCE(w.cover_url, ''), COALESCE(w.sam_cover_url, ''), COALESCE(w.thumbnail_cover_url, ''),
-			COALESCE(w.original_workno, ''), COALESCE(w.needs_rescrape, 0), COALESCE(w.scraped_at, 0),
+			COALESCE(w.original_workno, ''), COALESCE(w.source_url, ''), COALESCE(w.needs_rescrape, 0), COALESCE(w.scraped_at, 0),
 			COALESCE(w.created_at, 0),
 			us.rating, COALESCE(us.progress, ''),
-			(SELECT COUNT(*) FROM track tr WHERE tr.workno = w.workno)
+			(SELECT COUNT(*) FROM track tr WHERE tr.workno = w.workno
+				AND NOT EXISTS (SELECT 1 FROM track segment WHERE segment.source_track_id = tr.id))
 		FROM work w
 		LEFT JOIN user_state us ON us.workno = w.workno AND us.user_id = ?
 		WHERE %s
@@ -792,7 +860,7 @@ func (s *Store) ListWorks(ctx context.Context, opts ListWorksOptions) ([]Work, i
 			&w.Rating, &w.RateCount,
 			&w.ReviewCount, &w.DLCount, &w.CoverPath,
 			&w.CoverURL, &w.SamCoverURL, &w.ThumbnailCoverURL,
-			&w.OriginalWorkno, &needs, &w.ScrapedAt,
+			&w.OriginalWorkno, &w.SourceURL, &needs, &w.ScrapedAt,
 			&w.CreatedAt, &uRating, &w.Progress, &w.TrackCount,
 		); err != nil {
 			rows.Close()
@@ -924,6 +992,22 @@ func (s *Store) GetWorkDetail(ctx context.Context, workno string, userID int64) 
 	if err != nil {
 		return nil, err
 	}
+	if originalWorkno := dlsite.NormalizeWorkno(d.OriginalWorkno); originalWorkno != "" && originalWorkno != wno {
+		original := OriginalWork{Workno: originalWorkno}
+		err := s.db.QueryRowContext(ctx, `
+			SELECT title, COALESCE(circle_id, ''), COALESCE(circle_name, '')
+			FROM work WHERE workno = ?
+		`, originalWorkno).Scan(&original.Title, &original.CircleID, &original.CircleName)
+		switch {
+		case err == nil:
+			d.OriginalWork = &original
+		case !errors.Is(err, sql.ErrNoRows):
+			return nil, fmt.Errorf("load original work %s for %s: %w", originalWorkno, wno, err)
+		}
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT page_url FROM asmr18_work WHERE workno=?`, wno).Scan(&d.ASMR18SourceURL); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
 	d.HasSubtitle = hasSub != 0
 	d.NeedsRescrape = needs != 0
 	d.VAs = []string{}
@@ -1002,17 +1086,25 @@ func (s *Store) GetWorkDetail(ctx context.Context, workno string, userID int64) 
 	trRows, err := s.db.QueryContext(ctx, `
 		SELECT
 			tr.id, tr.workno, tr.storage_id, tr.work_rel, tr.rel_path,
-			COALESCE(tr.size, 0), tr.duration, COALESCE(tr.ord, 0),
-			COALESCE(pp.position, 0),
-			COALESCE(tr.stream_url, ''), COALESCE(tr.download_url, ''),
+			COALESCE(tr.size, 0), COALESCE(tr.duration, CASE WHEN source.duration > tr.start_seconds THEN source.duration - tr.start_seconds END),
+			COALESCE(tr.ord, 0), COALESCE(pp.position, CASE
+				WHEN source_position.position >= tr.start_seconds
+				AND COALESCE(source_position.position < COALESCE(tr.end_seconds, tr.start_seconds + tr.duration, source.duration), TRUE)
+				THEN source_position.position - tr.start_seconds END, 0),
+			COALESCE(source.stream_url, tr.stream_url, ''), COALESCE(tr.download_url, ''),
 			COALESCE(tr.stream_low_url, ''), COALESCE(tr.subtitle_url, ''),
-			COALESCE(tr.remote_hash, ''), COALESCE(st.kind, 'local')
+			COALESCE(tr.remote_hash, ''), COALESCE(tr.display_title, ''), COALESCE(st.kind, 'local'),
+			tr.source_track_id, tr.start_seconds, COALESCE(tr.end_seconds, tr.start_seconds + tr.duration,
+				CASE WHEN source.duration > tr.start_seconds THEN source.duration END)
 		FROM track tr
 		LEFT JOIN storage st ON st.id = tr.storage_id
+		LEFT JOIN track source ON source.id = tr.source_track_id
 		LEFT JOIN play_position pp ON pp.track_id = tr.id AND pp.user_id = ?
+		LEFT JOIN play_position source_position ON source_position.track_id = source.id AND source_position.user_id = ?
 		WHERE tr.workno = ?
+		AND NOT EXISTS (SELECT 1 FROM track segment WHERE segment.source_track_id = tr.id)
 		ORDER BY CASE WHEN COALESCE(st.kind, 'local') = 'local' THEN 0 ELSE 1 END, tr.ord ASC, tr.rel_path ASC
-	`, userID, wno)
+	`, userID, userID, wno)
 	if err != nil {
 		return nil, err
 	}
@@ -1020,20 +1112,16 @@ func (s *Store) GetWorkDetail(ctx context.Context, workno string, userID int64) 
 	var allFetched []Track
 	for trRows.Next() {
 		var tr Track
-		var dur sql.NullFloat64
 		var stKind string
 		if err := trRows.Scan(
 			&tr.ID, &tr.Workno, &tr.StorageID, &tr.WorkRel, &tr.RelPath,
-			&tr.Size, &dur, &tr.Ord, &tr.PlayPosition,
+			&tr.Size, &tr.Duration, &tr.Ord, &tr.PlayPosition,
 			&tr.StreamURL, &tr.DownloadURL, &tr.StreamLowURL, &tr.SubtitleURL,
-			&tr.RemoteHash, &stKind,
+			&tr.RemoteHash, &tr.Title, &stKind,
+			&tr.SourceTrackID, &tr.StartSeconds, &tr.EndSeconds,
 		); err != nil {
 			trRows.Close()
 			return nil, err
-		}
-		if dur.Valid {
-			v := dur.Float64
-			tr.Duration = &v
 		}
 		tr.IsRemote = stKind == "asmrone" || tr.StreamURL != ""
 		if !tr.IsRemote {
@@ -1052,6 +1140,28 @@ func (s *Store) GetWorkDetail(ctx context.Context, workno string, userID int64) 
 			continue
 		}
 		d.Tracks = append(d.Tracks, tr)
+	}
+	chapterRows, err := s.db.QueryContext(ctx, `SELECT c.track_id,c.title,c.start FROM track_chapter c JOIN track t ON t.id=c.track_id WHERE t.workno=? ORDER BY c.ord`, wno)
+	if err != nil {
+		return nil, err
+	}
+	chapters := map[int64][]Chapter{}
+	for chapterRows.Next() {
+		var id int64
+		var ch Chapter
+		if err := chapterRows.Scan(&id, &ch.Title, &ch.Start); err != nil {
+			chapterRows.Close()
+			return nil, err
+		}
+		chapters[id] = append(chapters[id], ch)
+	}
+	chapterErr := chapterRows.Err()
+	chapterRows.Close()
+	if chapterErr != nil {
+		return nil, chapterErr
+	}
+	for i := range d.Tracks {
+		d.Tracks[i].Chapters = chapters[d.Tracks[i].ID]
 	}
 	d.TrackCount = len(d.Tracks)
 	d.Tree = BuildTrackTree(d.Tracks)
@@ -1098,6 +1208,9 @@ func BuildTrackTree(tracks []Track) []*TrackTreeNode {
 			isLeaf := idx == len(parts)-1
 			if isLeaf {
 				trCopy := tr
+				if tr.Title != "" {
+					part = tr.Title
+				}
 				curr.Children = append(curr.Children, &TrackTreeNode{
 					Name:    part,
 					Type:    "audio",
@@ -1155,23 +1268,25 @@ type ResolvedTrack struct {
 
 func (s *Store) ResolveTrack(ctx context.Context, trackID int64) (*ResolvedTrack, error) {
 	var rt ResolvedTrack
-	var dur sql.NullFloat64
 	err := s.db.QueryRowContext(ctx, `
 		SELECT
 			tr.id, tr.workno, tr.storage_id, tr.work_rel, tr.rel_path,
-			COALESCE(tr.size, 0), tr.duration, COALESCE(tr.ord, 0),
-			COALESCE(tr.stream_url, ''), COALESCE(tr.download_url, ''),
+			COALESCE(tr.size, 0), COALESCE(tr.duration, CASE WHEN source.duration > tr.start_seconds THEN source.duration - tr.start_seconds END),
+			COALESCE(tr.ord, 0), COALESCE(source.stream_url, tr.stream_url, ''), COALESCE(tr.download_url, ''),
 			COALESCE(tr.stream_low_url, ''), COALESCE(tr.subtitle_url, ''),
-			COALESCE(tr.remote_hash, ''),
-			COALESCE(st.kind, 'local'), COALESCE(st.root, '')
+			COALESCE(tr.remote_hash, ''), COALESCE(tr.display_title, ''),
+			COALESCE(st.kind, 'local'), COALESCE(st.root, ''), tr.source_track_id,
+			tr.start_seconds, COALESCE(tr.end_seconds, tr.start_seconds + tr.duration,
+				CASE WHEN source.duration > tr.start_seconds THEN source.duration END)
 		FROM track tr
 		LEFT JOIN storage st ON st.id = tr.storage_id
+		LEFT JOIN track source ON source.id = tr.source_track_id
 		WHERE tr.id = ?
 	`, trackID).Scan(
 		&rt.ID, &rt.Workno, &rt.StorageID, &rt.WorkRel, &rt.RelPath,
-		&rt.Size, &dur, &rt.Ord,
-		&rt.StreamURL, &rt.DownloadURL, &rt.StreamLowURL, &rt.SubtitleURL, &rt.RemoteHash,
-		&rt.StorageKind, &rt.StorageRoot,
+		&rt.Size, &rt.Duration, &rt.Ord,
+		&rt.StreamURL, &rt.DownloadURL, &rt.StreamLowURL, &rt.SubtitleURL, &rt.RemoteHash, &rt.Title,
+		&rt.StorageKind, &rt.StorageRoot, &rt.SourceTrackID, &rt.StartSeconds, &rt.EndSeconds,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -1179,16 +1294,14 @@ func (s *Store) ResolveTrack(ctx context.Context, trackID int64) (*ResolvedTrack
 	if err != nil {
 		return nil, err
 	}
-	if dur.Valid {
-		v := dur.Float64
-		rt.Duration = &v
-	}
 	rt.IsRemote = rt.StorageKind == "asmrone" || rt.StreamURL != ""
 	return &rt, nil
 }
 
 // RemoteTrackInput represents a remote track discovered from asmr.one /api/tracks/{id}.
 type RemoteTrackInput struct {
+	Title        string
+	Chapters     []Chapter
 	RelPath      string
 	Size         int64
 	Duration     float64
@@ -1218,6 +1331,16 @@ func (s *Store) SaveRemoteTracks(ctx context.Context, workno string, tracks []Re
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := saveRemoteTracksTx(ctx, tx, wno, st.ID, tracks); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE work SET remote_files_json = ? WHERE workno = ?`, remoteFilesJSON, wno); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func saveRemoteTracksTx(ctx context.Context, tx *sql.Tx, wno string, storageID int64, tracks []RemoteTrackInput) error {
 	hasSub := 0
 	seenRel := make(map[string]bool, len(tracks))
 	for _, tr := range tracks {
@@ -1243,13 +1366,29 @@ func (s *Store) SaveRemoteTracks(ctx context.Context, workno string, tracks []Re
 				stream_low_url = excluded.stream_low_url,
 				subtitle_url   = excluded.subtitle_url,
 				remote_hash    = excluded.remote_hash
-		`, wno, st.ID, tr.RelPath, tr.Size, durArg, tr.Ord, tr.StreamURL, tr.DownloadURL, tr.StreamLowURL, tr.SubtitleURL, tr.RemoteHash); err != nil {
+		`, wno, storageID, tr.RelPath, tr.Size, durArg, tr.Ord, tr.StreamURL, tr.DownloadURL, tr.StreamLowURL, tr.SubtitleURL, tr.RemoteHash); err != nil {
 			return err
+		}
+
+		var trackID int64
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM track WHERE workno=? AND storage_id=? AND work_rel='' AND rel_path=?`, wno, storageID, tr.RelPath).Scan(&trackID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE track SET display_title=? WHERE id=?`, tr.Title, trackID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM track_chapter WHERE track_id=?`, trackID); err != nil {
+			return err
+		}
+		for i, ch := range tr.Chapters {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO track_chapter(track_id, ord, title, start) VALUES(?,?,?,?)`, trackID, i, ch.Title, ch.Start); err != nil {
+				return err
+			}
 		}
 	}
 
 	// Prune removed remote tracks for this work while keeping track IDs stable for play_position!
-	rows, err := tx.QueryContext(ctx, `SELECT id, rel_path FROM track WHERE workno = ? AND storage_id = ?`, wno, st.ID)
+	rows, err := tx.QueryContext(ctx, `SELECT id, rel_path FROM track WHERE workno = ? AND storage_id = ? AND source_track_id IS NULL`, wno, storageID)
 	if err != nil {
 		return err
 	}
@@ -1257,25 +1396,34 @@ func (s *Store) SaveRemoteTracks(ctx context.Context, workno string, tracks []Re
 	for rows.Next() {
 		var id int64
 		var rp string
-		if rows.Scan(&id, &rp) == nil && !seenRel[rp] {
+		if err := rows.Scan(&id, &rp); err != nil {
+			rows.Close()
+			return err
+		}
+		if !seenRel[rp] {
 			staleIDs = append(staleIDs, id)
 		}
 	}
+	rowsErr := rows.Err()
 	rows.Close()
+	if rowsErr != nil {
+		return rowsErr
+	}
 	for _, id := range staleIDs {
-		_, _ = tx.ExecContext(ctx, `DELETE FROM track WHERE id = ?`, id)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM track WHERE id = ?`, id); err != nil {
+			return err
+		}
 	}
 
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE work SET
-			remote_files_json = ?,
 			has_subtitle = CASE WHEN ? = 1 THEN 1 ELSE has_subtitle END
 		WHERE workno = ?
-	`, remoteFilesJSON, hasSub, wno); err != nil {
+	`, hasSub, wno); err != nil {
 		return err
 	}
 
-	return tx.Commit()
+	return nil
 }
 
 func (rt *ResolvedTrack) AbsFilePath() string {
@@ -1631,14 +1779,15 @@ type FacetCount struct {
 	Count  int    `json:"count"`
 }
 
-func (s *Store) ListFacets(ctx context.Context, ageMode string) (circles, vas, tags []FacetCount, err error) {
-	ageCond := buildAgeCondition("w", ageMode)
+// ListFacets counts circles, voice actors, and tags for an age and source selection.
+func (s *Store) ListFacets(ctx context.Context, ageMode string, source WorkSource) (circles, vas, tags []FacetCount, err error) {
+	scope := workScopeCondition(ageMode, source)
 
 	cRows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT w.circle_name, COUNT(*) AS cnt FROM work w
 		WHERE COALESCE(w.circle_name, '') != '' AND %s
-		GROUP BY w.circle_name ORDER BY cnt DESC, w.circle_name ASC LIMIT 100
-	`, ageCond))
+		GROUP BY w.circle_name ORDER BY cnt DESC, w.circle_name ASC
+	`, scope))
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -1656,8 +1805,8 @@ func (s *Store) ListFacets(ctx context.Context, ageMode string) (circles, vas, t
 		JOIN person p ON p.id = wp.person_id
 		JOIN work w ON w.workno = wp.workno
 		WHERE wp.role = 'va' AND %s
-		GROUP BY p.id ORDER BY cnt DESC, p.name ASC LIMIT 100
-	`, ageCond))
+		GROUP BY p.id ORDER BY cnt DESC, p.name ASC
+	`, scope))
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -1676,7 +1825,7 @@ func (s *Store) ListFacets(ctx context.Context, ageMode string) (circles, vas, t
 		JOIN work w ON w.workno = wt.workno
 		WHERE %s
 		GROUP BY t.id ORDER BY CASE WHEN t.source = 'user' THEN 0 ELSE 1 END, cnt DESC, t.name ASC LIMIT 150
-	`, ageCond))
+	`, scope))
 	if err != nil {
 		return nil, nil, nil, err
 	}

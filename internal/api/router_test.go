@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,7 +18,6 @@ import (
 	"github.com/SiIverAsh/otoha/internal/db"
 	"github.com/SiIverAsh/otoha/internal/dlsite"
 	"github.com/SiIverAsh/otoha/internal/search"
-	"github.com/SiIverAsh/otoha/web"
 )
 
 func TestFullRouterEndpointsAuthWebDAVBeaconAndVacuum(t *testing.T) {
@@ -62,30 +62,28 @@ func TestFullRouterEndpointsAuthWebDAVBeaconAndVacuum(t *testing.T) {
 		_ = searchEng.IndexWork(*sd)
 	}
 
-	distFS, err := web.DistFS()
-	if err != nil {
-		t.Fatalf("web.DistFS: %v", err)
-	}
-
 	router := NewRouter(Dependencies{
-		Store:    store,
-		Search:   searchEng,
-		Cfg:      cfg,
-		Logger:   log.New(io.Discard, "", 0),
-		Frontend: distFS,
+		Store:  store,
+		Search: searchEng,
+		Cfg:    cfg,
+		Logger: log.New(io.Discard, "", 0),
 	})
 	srv := httptest.NewServer(router)
 	defer srv.Close()
 
-	// 1. Embedded SPA index.html
-	spaResp, err := http.Get(srv.URL + "/")
-	if err != nil || spaResp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /: status=%v err=%v", spaResp, err)
+	// 1. The document includes catalog data before any browser JavaScript runs.
+	document := performWebRequest(router, http.MethodGet, "/", false, nil)
+	if document.Code != http.StatusOK ||
+		!strings.Contains(document.Body.String(), "音葉テスト作品") ||
+		!strings.Contains(document.Body.String(), `id="player-region"`) {
+		t.Fatalf("GET / did not include document shell and works: %d", document.Code)
 	}
-	spaBody, _ := io.ReadAll(spaResp.Body)
-	spaResp.Body.Close()
-	if !strings.Contains(string(spaBody), "Otoha") {
-		t.Fatalf("expected Otoha SPA HTML")
+	fragment := performWebRequest(router, http.MethodGet, "/?q="+url.QueryEscape("音葉テスト作品"), true, nil)
+	if fragment.Code != http.StatusOK ||
+		!strings.Contains(fragment.Body.String(), `data-work-card="RJ01234567"`) ||
+		!strings.Contains(fragment.Body.String(), `hx-swap-oob="outerHTML"`) ||
+		strings.Contains(fragment.Body.String(), `id="player-region"`) {
+		t.Fatalf("HTMX search did not return a page fragment: %d", fragment.Code)
 	}
 
 	// 2. Detail endpoint returns nested tree, subtitle detection, and track ID
@@ -164,4 +162,111 @@ func TestFullRouterEndpointsAuthWebDAVBeaconAndVacuum(t *testing.T) {
 	if davResp.StatusCode != http.StatusMultiStatus {
 		t.Fatalf("expected 207 Multi-Status on Basic Auth WebDAV, got %d", davResp.StatusCode)
 	}
+}
+
+func TestWebLoginAndPageFragments(t *testing.T) {
+	cfg := config.Default(t.TempDir())
+	cfg.AuthEnabled = true
+	store, err := db.Open(cfg.DBPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	searchEngine := search.Open(cfg.BlevePath())
+	t.Cleanup(func() { searchEngine.Close() })
+	const password = "testing password"
+	hash, err := HashPassword(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertUser(t.Context(), "alice", hash, true, false); err != nil {
+		t.Fatal(err)
+	}
+	router := NewRouter(Dependencies{Store: store, Search: searchEngine, Cfg: cfg, Logger: log.New(io.Discard, "", 0)})
+
+	loginRedirect := performWebRequest(router, http.MethodGet, "/settings", false, nil)
+	if loginRedirect.Code != http.StatusSeeOther || loginRedirect.Header().Get("Location") != "/login?next=%2Fsettings" {
+		t.Fatalf("unauthenticated document redirect: %d %v", loginRedirect.Code, loginRedirect.Header())
+	}
+	htmxRedirect := performWebRequest(router, http.MethodGet, "/history", true, nil)
+	if htmxRedirect.Code != http.StatusOK || htmxRedirect.Header().Get("HX-Redirect") != "/login?next=%2Fhistory" {
+		t.Fatalf("unauthenticated fragment redirect: %d %v", htmxRedirect.Code, htmxRedirect.Header())
+	}
+	login := performWebRequest(router, http.MethodGet, loginRedirect.Header().Get("Location"), false, nil)
+	if login.Code != http.StatusOK || !strings.Contains(login.Body.String(), `id="login-form"`) {
+		t.Fatalf("login form was not rendered: %d", login.Code)
+	}
+
+	form := url.Values{"username": {"alice"}, "password": {"wrong password"}, "next": {"/settings"}}
+	rejection := performWebRequest(router, http.MethodPost, "/login", true, form)
+	if rejection.Code != http.StatusUnprocessableEntity ||
+		!strings.Contains(rejection.Body.String(), "用户名或密码错误") ||
+		strings.Contains(strings.ToLower(rejection.Body.String()), "<!doctype") ||
+		len(rejection.Result().Cookies()) != 0 {
+		t.Fatalf("invalid password response: %d %v", rejection.Code, rejection.Header())
+	}
+	form.Set("password", password)
+	success := performWebRequest(router, http.MethodPost, "/login", true, form)
+	cookies := success.Result().Cookies()
+	if success.Code != http.StatusOK || success.Header().Get("HX-Redirect") != "/settings" ||
+		len(cookies) != 1 || !cookies[0].HttpOnly {
+		t.Fatalf("successful login response: %d %v", success.Code, success.Header())
+	}
+
+	document := performWebRequest(router, http.MethodGet, "/settings", false, nil, cookies[0])
+	if document.Code != http.StatusOK ||
+		!strings.Contains(document.Body.String(), `id="settings-asmr18"`) ||
+		!strings.Contains(document.Body.String(), `id="settings-users"`) ||
+		!strings.Contains(document.Body.String(), `id="player-region"`) {
+		t.Fatalf("settings were not rendered in the document shell: %d", document.Code)
+	}
+	fragment := performWebRequest(router, http.MethodGet, "/history", true, nil, cookies[0])
+	if fragment.Code != http.StatusOK ||
+		!strings.Contains(fragment.Body.String(), "暂无收听记录") ||
+		strings.Contains(fragment.Body.String(), `id="player-region"`) {
+		t.Fatalf("history fragment did not render: %d", fragment.Code)
+	}
+	task := performWebRequest(router, http.MethodGet, "/ui/settings/task", true, nil, cookies[0])
+	if task.Code != http.StatusOK ||
+		!strings.Contains(task.Body.String(), `id="asmr18-preview-result" hx-swap-oob="innerHTML"`) {
+		t.Fatalf("settings status did not include its out-of-band preview target: %d", task.Code)
+	}
+
+	crossSite := httptest.NewRequest(http.MethodDelete, "/ui/history", nil)
+	crossSite.Header.Set("Sec-Fetch-Site", "cross-site")
+	crossSite.AddCookie(cookies[0])
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, crossSite)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("cross-site history deletion was not blocked: %d", response.Code)
+	}
+
+	asset := performWebRequest(router, http.MethodGet, "/assets/styles.css", false, nil)
+	if asset.Code != http.StatusOK || !strings.HasPrefix(asset.Header().Get("Content-Type"), "text/css") {
+		t.Fatalf("embedded stylesheet response: %d %v", asset.Code, asset.Header())
+	}
+	missing := performWebRequest(router, http.MethodGet, "/missing", false, nil)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("unknown document route status: %d", missing.Code)
+	}
+}
+
+func performWebRequest(router http.Handler, method, path string, htmx bool, form url.Values, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, path, strings.NewReader(form.Encode()))
+	if form != nil {
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	if htmx {
+		request.Header.Set("HX-Request", "true")
+	}
+	for _, cookie := range cookies {
+		request.AddCookie(cookie)
+	}
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	return recorder
 }

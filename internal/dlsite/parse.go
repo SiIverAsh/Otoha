@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PuerkitoBio/goquery"
 )
@@ -82,27 +83,47 @@ func FormatLocaleCookie(locale string) string {
 }
 
 type rawProductItem struct {
-	Workno          string          `json:"workno"`
-	WorkName        string          `json:"work_name"`
-	MakerID         string          `json:"maker_id"`
-	MakerName       string          `json:"maker_name"`
-	RegistDate      string          `json:"regist_date"`
-	AgeCategory     int             `json:"age_category"`
-	WorkType        string          `json:"work_type"`
-	Price           flexInt         `json:"price"`
-	OfficialPrice   flexInt         `json:"official_price"`
-	DLCount         flexInt         `json:"dl_count"`
-	RateAverage2dp  flexFloat       `json:"rate_average_2dp"`
-	RateCount       flexInt         `json:"rate_count"`
-	ReviewCount     flexInt         `json:"review_count"`
-	ContentsSize    flexInt64       `json:"contents_file_size"`
-	SeriesID        string          `json:"series_id"`
-	SeriesName      string          `json:"series_name"`
-	ImageMain       rawImage        `json:"image_main"`
-	Genres          []rawNamedItem  `json:"genres"`
-	GenresReplaced  []rawNamedItem  `json:"genres_replaced"`
-	Creaters        json.RawMessage `json:"creaters"` // PHP json_encode outputs [] when empty!
-	TranslationInfo *rawTransInfo   `json:"translation_info"`
+	Workno           string          `json:"workno"`
+	WorkName         string          `json:"work_name"`
+	MakerID          string          `json:"maker_id"`
+	MakerName        string          `json:"maker_name"`
+	RegistDate       string          `json:"regist_date"`
+	AgeCategory      int             `json:"age_category"`
+	WorkType         string          `json:"work_type"`
+	Price            flexInt         `json:"price"`
+	OfficialPrice    flexInt         `json:"official_price"`
+	DLCount          flexInt         `json:"dl_count"`
+	RateAverage2dp   flexFloat       `json:"rate_average_2dp"`
+	RateCount        flexInt         `json:"rate_count"`
+	ReviewCount      flexInt         `json:"review_count"`
+	ContentsSize     flexInt64       `json:"contents_file_size"`
+	SeriesID         string          `json:"series_id"`
+	SeriesName       string          `json:"series_name"`
+	ImageMain        rawImage        `json:"image_main"`
+	Genres           []rawNamedItem  `json:"genres"`
+	GenresReplaced   []rawNamedItem  `json:"genres_replaced"`
+	Creaters         json.RawMessage `json:"creaters"` // PHP json_encode outputs [] when empty!
+	TranslationInfo  json.RawMessage `json:"translation_info"`
+	Duration         flexInt         `json:"duration"`
+	HasSubtitle      bool            `json:"has_subtitle"`
+	ImageThum        rawImage        `json:"image_thum"`
+	ImageThumb       string          `json:"image_thumb"`
+	SiteID           string          `json:"site_id"`
+	RateDetail       json.RawMessage `json:"rate_count_detail"`
+	Rank             json.RawMessage `json:"rank"`
+	LanguageEditions json.RawMessage `json:"language_editions"`
+	OtherEditions    json.RawMessage `json:"other_language_editions_in_db"`
+	WorkAttributes   string          `json:"work_attributes"`
+	RankTotal        flexInt         `json:"rank_total"`
+	RankYear         flexInt         `json:"rank_year"`
+	RankMonth        flexInt         `json:"rank_month"`
+	RankWeek         flexInt         `json:"rank_week"`
+	RankDay          flexInt         `json:"rank_day"`
+	RankTotalDate    string          `json:"rank_total_date"`
+	RankYearDate     string          `json:"rank_year_date"`
+	RankMonthDate    string          `json:"rank_month_date"`
+	RankWeekDate     string          `json:"rank_week_date"`
+	RankDayDate      string          `json:"rank_day_date"`
 }
 
 type rawImage struct {
@@ -228,14 +249,23 @@ func ParseProductJSON(body []byte, expectedWorkno string) (*Metadata, error) {
 		return nil, ErrWorkNotFound
 	}
 	item := arr[0]
+	expected := NormalizeWorkno(expectedWorkno)
+	if expected != "" {
+		for _, candidate := range arr {
+			if NormalizeWorkno(candidate.Workno) == expected {
+				item = candidate
+				break
+			}
+		}
+	}
 	wno := NormalizeWorkno(item.Workno)
 	if wno == "" {
 		wno = NormalizeWorkno(expectedWorkno)
 	}
-	releaseDate := strings.TrimSpace(item.RegistDate)
-	if len(releaseDate) >= 10 {
-		releaseDate = releaseDate[:10]
+	if expected := NormalizeWorkno(expectedWorkno); expected != "" && wno != expected {
+		return nil, fmt.Errorf("product.json returned %s for %s", wno, expected)
 	}
+	releaseDate := parseReleaseDate(item.RegistDate)
 	price := int(item.Price)
 	if price == 0 {
 		price = int(item.OfficialPrice)
@@ -246,30 +276,66 @@ func ParseProductJSON(body []byte, expectedWorkno string) (*Metadata, error) {
 	}
 
 	m := &Metadata{
-		Workno:      wno,
-		Title:       strings.TrimSpace(item.WorkName),
-		CircleID:    strings.TrimSpace(item.MakerID),
-		CircleName:  strings.TrimSpace(item.MakerName),
-		ReleaseDate: releaseDate,
-		AgeCategory: item.AgeCategory,
-		WorkType:    strings.TrimSpace(item.WorkType),
-		Price:       price,
-		Rating:      float64(item.RateAverage2dp),
-		RateCount:   int(item.RateCount),
-		ReviewCount: int(item.ReviewCount),
-		DLCount:     int(item.DLCount),
-		FileSize:    int64(item.ContentsSize),
-		SeriesID:    strings.TrimSpace(item.SeriesID),
-		SeriesName:  strings.TrimSpace(item.SeriesName),
-		CoverURL:    normalizeCoverURL(item.ImageMain.URL),
-		Tags:        extractNames(genres),
-		Source:      "product.json",
+		Workno:               wno,
+		Title:                strings.TrimSpace(item.WorkName),
+		CircleID:             strings.TrimSpace(item.MakerID),
+		CircleName:           strings.TrimSpace(item.MakerName),
+		ReleaseDate:          releaseDate,
+		AgeCategory:          item.AgeCategory,
+		WorkType:             strings.TrimSpace(item.WorkType),
+		Price:                price,
+		Rating:               float64(item.RateAverage2dp),
+		RateCount:            int(item.RateCount),
+		ReviewCount:          int(item.ReviewCount),
+		DLCount:              int(item.DLCount),
+		FileSize:             int64(item.ContentsSize),
+		Duration:             int(item.Duration),
+		HasSubtitle:          item.HasSubtitle,
+		SeriesID:             strings.TrimSpace(item.SeriesID),
+		SeriesName:           strings.TrimSpace(item.SeriesName),
+		CoverURL:             normalizeCoverURL(item.ImageMain.URL),
+		SamCoverURL:          normalizeCoverURL(item.ImageThum.URL),
+		ThumbnailCoverURL:    normalizeCoverURL(item.ImageThumb),
+		SourceType:           "DLSITE",
+		SourceURL:            fmt.Sprintf("https://www.dlsite.com/maniax/work/=/product_id/%s.html", wno),
+		WorkAttributes:       strings.TrimSpace(item.WorkAttributes),
+		LanguageEditionsJSON: compactJSON(item.LanguageEditions),
+		OtherEditionsJSON:    compactJSON(item.OtherEditions),
+		RateDetailJSON:       compactJSON(item.RateDetail),
+		RankJSON:             compactJSON(item.Rank),
+		TranslationInfoJSON:  compactJSON(item.TranslationInfo),
+		Tags:                 extractNames(genres),
+		Source:               "product.json",
 	}
 
-	if item.TranslationInfo != nil {
-		if orig := NormalizeWorkno(item.TranslationInfo.OriginalWorkno); orig != "" && orig != wno {
+	if item.SiteID != "" && regexp.MustCompile(`^[a-z]+$`).MatchString(item.SiteID) {
+		m.SourceURL = fmt.Sprintf("https://www.dlsite.com/%s/work/=/product_id/%s.html", item.SiteID, wno)
+	}
+	if m.RankJSON == "" {
+		ranks := make(map[string]any)
+		for _, rank := range []struct {
+			name  string
+			value flexInt
+			date  string
+		}{
+			{"total", item.RankTotal, item.RankTotalDate}, {"year", item.RankYear, item.RankYearDate},
+			{"month", item.RankMonth, item.RankMonthDate}, {"week", item.RankWeek, item.RankWeekDate}, {"day", item.RankDay, item.RankDayDate},
+		} {
+			if rank.value > 0 {
+				ranks[rank.name] = map[string]any{"rank": int(rank.value), "date": rank.date}
+			}
+		}
+		if len(ranks) > 0 {
+			raw, _ := json.Marshal(ranks)
+			m.RankJSON = string(raw)
+		}
+	}
+	if len(item.TranslationInfo) > 0 {
+		var translation rawTransInfo
+		_ = json.Unmarshal(item.TranslationInfo, &translation)
+		if orig := NormalizeWorkno(translation.OriginalWorkno); orig != "" && orig != wno {
 			m.OriginalWorkno = orig
-		} else if parent := NormalizeWorkno(item.TranslationInfo.ParentWorkno); parent != "" && parent != wno {
+		} else if parent := NormalizeWorkno(translation.ParentWorkno); parent != "" && parent != wno {
 			m.OriginalWorkno = parent
 		}
 	}
@@ -288,11 +354,18 @@ func ParseProductJSON(body []byte, expectedWorkno string) (*Metadata, error) {
 	return m, nil
 }
 
-// MergeFallbackMetadata fills missing fields in dst from fallback src (used for
-// translation_info.original_workno and ja_jp fallback, §3.2 & §13).
+// MergeFallbackMetadata fills missing fields from the same work. Original editions
+// may contribute shared credits. Publishing details belong to each edition.
 func MergeFallbackMetadata(dst, src *Metadata) {
 	if dst == nil || src == nil {
 		return
+	}
+	if dst.Workno != "" && src.Workno != "" && NormalizeWorkno(dst.Workno) != NormalizeWorkno(src.Workno) {
+		mergeSharedCredits(dst, src)
+		return
+	}
+	if dst.Title == "" {
+		dst.Title = src.Title
 	}
 	if dst.CircleID == "" {
 		dst.CircleID = src.CircleID
@@ -398,6 +471,44 @@ func MergeFallbackMetadata(dst, src *Metadata) {
 	}
 }
 
+func mergeSharedCredits(dst, src *Metadata) {
+	credits := &Metadata{
+		Workno: dst.Workno, SeriesID: src.SeriesID, SeriesName: src.SeriesName,
+		VAs: src.VAs, Scenarios: src.Scenarios, Illusts: src.Illusts,
+		Musics: src.Musics, Tags: src.Tags,
+	}
+	MergeFallbackMetadata(dst, credits)
+}
+
+func compactJSON(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" || string(raw) == "[]" || string(raw) == "{}" {
+		return ""
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		return ""
+	}
+	return compact.String()
+}
+
+var releaseDateRe = regexp.MustCompile(`(\d{4})\D+(\d{1,2})\D+(\d{1,2})`)
+
+func parseReleaseDate(value string) string {
+	m := releaseDateRe.FindStringSubmatch(value)
+	if len(m) != 4 {
+		return ""
+	}
+	year, _ := strconv.Atoi(m[1])
+	month, _ := strconv.Atoi(m[2])
+	day, _ := strconv.Atoi(m[3])
+	d := time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
+	if d.Year() != year || int(d.Month()) != month || d.Day() != day {
+		return ""
+	}
+	return d.Format("2006-01-02")
+}
+
 type rawAjaxInfo struct {
 	DLCount        flexInt   `json:"dl_count"`
 	RateAverage2dp flexFloat `json:"rate_average_2dp"`
@@ -418,13 +529,6 @@ func ApplyAjaxDynamic(dst *Metadata, body []byte, workno string) error {
 		return fmt.Errorf("parse info/ajax: %w", err)
 	}
 	info, ok := m[strings.ToUpper(workno)]
-	if !ok {
-		for _, v := range m {
-			info = v
-			ok = true
-			break
-		}
-	}
 	if !ok {
 		return nil
 	}
@@ -488,9 +592,11 @@ func ParseWorkHTML(body []byte, workno string) (*Metadata, error) {
 	}
 
 	m := &Metadata{
-		Workno: NormalizeWorkno(workno),
-		Title:  title,
-		Source: "html",
+		Workno:     NormalizeWorkno(workno),
+		Title:      title,
+		Source:     "html",
+		SourceType: "DLSITE",
+		SourceURL:  fmt.Sprintf("https://www.dlsite.com/maniax/work/=/product_id/%s.html", NormalizeWorkno(workno)),
 	}
 
 	circleLink := doc.Find("span.maker_name a").First()
@@ -521,10 +627,7 @@ func ParseWorkHTML(body []byte, workno string) (*Metadata, error) {
 				m.AgeCategory = AgeGeneral
 			}
 		case "販売日", "贩卖日", "販賣日", "Release date", "판매일":
-			nums := strings.Join(digitsOnlyRe.FindAllString(tdText, -1), "")
-			if len(nums) >= 8 {
-				m.ReleaseDate = fmt.Sprintf("%s-%s-%s", nums[0:4], nums[4:6], nums[6:8])
-			}
+			m.ReleaseDate = parseReleaseDate(tdText)
 		case "シリーズ名", "系列名", "Series name", "시리즈명":
 			a := td.Find("a").First()
 			if a.Length() > 0 {

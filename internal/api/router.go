@@ -1,14 +1,8 @@
 package api
 
 import (
-	"io"
-	"io/fs"
 	"log"
-	"mime"
 	"net/http"
-	"path"
-	"path/filepath"
-	"strings"
 
 	"github.com/SiIverAsh/otoha/internal/api/handlers"
 	"github.com/SiIverAsh/otoha/internal/config"
@@ -20,16 +14,15 @@ import (
 
 // Dependencies bundles runtime services required by the HTTP server.
 type Dependencies struct {
-	Store    *db.Store
-	Search   *search.Engine
-	History  *history.Service
-	Cfg      *config.Config
-	Tasks    *TaskManager
-	Logger   *log.Logger
-	Frontend fs.FS
+	Store   *db.Store
+	Search  *search.Engine
+	History *history.Service
+	Cfg     *config.Config
+	Tasks   *TaskManager
+	Logger  *log.Logger
 }
 
-// NewRouter constructs the top-level Go 1.22+ HTTP handler for `/api/*`, `/dav/*`, and embedded SPA (§2 & §9).
+// NewRouter constructs the top-level Go 1.22+ HTTP handler for `/api/*`, `/dav/*`, and server-rendered HTML.
 func NewRouter(deps Dependencies) http.Handler {
 	if deps.History == nil {
 		deps.History = history.NewService(deps.Store, deps.Cfg)
@@ -67,6 +60,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	apiMux.HandleFunc("POST /api/works/{workno}/state", h.UpdateWorkState)
 	apiMux.HandleFunc("POST /api/works/{workno}/tags", h.UpdateWorkTags)
 
+	apiMux.HandleFunc("POST /api/asmr18/sync", h.TriggerASMR18Sync)
 	apiMux.HandleFunc("POST /api/asmrone/sync", h.TriggerAsmrOneSync)
 	apiMux.HandleFunc("GET /api/asmrone/status", h.GetAsmrOneSyncStatus)
 
@@ -123,43 +117,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	})
 	rootMux.Handle("/dav/", davGuarded)
 
-	// Embedded Frontend SPA (§2)
-	if deps.Frontend != nil {
-		rootMux.Handle("/", serveEmbeddedSPA(deps.Frontend))
-	} else {
-		rootMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			_, _ = io.WriteString(w, "Otoha server running")
-		})
-	}
+	rootMux.Handle("/", webRouter(deps, h))
 
 	return rootMux
-}
-
-func serveEmbeddedSPA(distFS fs.FS) http.Handler {
-	fileServer := http.FileServer(http.FS(distFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		clean := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
-		if clean == "" || clean == "." {
-			clean = "index.html"
-		}
-		if f, err := distFS.Open(clean); err == nil {
-			_ = f.Close()
-			if ext := filepath.Ext(clean); ext != "" {
-				if ct := mime.TypeByExtension(ext); ct != "" {
-					w.Header().Set("Content-Type", ct)
-				}
-			}
-			fileServer.ServeHTTP(w, r)
-			return
-		}
-		// Fallback to index.html for SPA routes
-		raw, err := fs.ReadFile(distFS, "index.html")
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(raw)
-	})
 }

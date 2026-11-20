@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SiIverAsh/otoha/internal/asmr18"
 	"github.com/SiIverAsh/otoha/internal/config"
 	"github.com/SiIverAsh/otoha/internal/db"
 	"github.com/SiIverAsh/otoha/internal/dlsite"
@@ -26,9 +28,11 @@ import (
 type TaskRunner interface {
 	TriggerScan(storageID int64, scrapeMetadata bool, forceScrape bool) (bool, error)
 	TriggerAsmrOneSync(opts scrape.SyncOptions) (bool, error)
+	TriggerASMR18Sync(opts scrape.ASMR18Options) (bool, error)
 	Cancel() bool
 	ServeSSE(w http.ResponseWriter, r *http.Request)
 	SnapshotJSON() any
+	SettingsTaskProgress() (*scrape.AsmrOneSyncCheckpoint, *asmr18.Work)
 }
 
 // AuthCallbacks provides password/session helpers without cyclic imports.
@@ -114,26 +118,54 @@ func (a *API) GetMe(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type loginRequest struct {
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	NewPassword string `json:"new_password"`
+}
+
+type loginResponse struct {
+	Token string   `json:"token"`
+	User  *db.User `json:"user"`
+}
+
+type loginError struct {
+	status        int
+	message       string
+	resetPassword bool
+}
+
+// Login authenticates a JSON API client and issues a session.
 func (a *API) Login(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Username    string `json:"username"`
-		Password    string `json:"password"`
-		NewPassword string `json:"new_password"`
-	}
+	var req loginRequest
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+	response, failure := a.login(w, r, req)
+	if failure != nil {
+		if failure.resetPassword {
+			writeJSON(w, failure.status, struct {
+				Error             string `json:"error"`
+				MustResetPassword bool   `json:"must_reset_password"`
+			}{Error: failure.message, MustResetPassword: true})
+		} else {
+			writeErr(w, failure.status, failure.message)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (a *API) login(w http.ResponseWriter, r *http.Request, req loginRequest) (loginResponse, *loginError) {
 	uname := strings.TrimSpace(req.Username)
 	if uname == "" {
-		writeErr(w, http.StatusBadRequest, "username is required")
-		return
+		return loginResponse{}, &loginError{status: http.StatusBadRequest, message: "username is required"}
 	}
 
 	u, err := a.Store.GetUserByUsername(r.Context(), uname)
 	if err != nil {
-		writeErr(w, http.StatusUnauthorized, "用户名或密码错误")
-		return
+		return loginResponse{}, &loginError{status: http.StatusUnauthorized, message: "用户名或密码错误"}
 	}
 
 	// §14.4: Migrated kikoeru user has empty password_hash & must_reset_password = true
@@ -143,38 +175,29 @@ func (a *API) Login(w http.ResponseWriter, r *http.Request) {
 			targetPwd = req.Password
 		}
 		if len(targetPwd) < 4 {
-			writeJSON(w, http.StatusForbidden, map[string]any{
-				"error":               "该账号需要首次重设密码（至少 4 位）",
-				"must_reset_password": true,
-			})
-			return
+			return loginResponse{}, &loginError{
+				status:        http.StatusForbidden,
+				message:       "该账号需要首次重设密码（至少 4 位）",
+				resetPassword: true,
+			}
 		}
 		hash, err := a.Auth.HashPassword(targetPwd)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
+			return loginResponse{}, &loginError{status: http.StatusBadRequest, message: err.Error()}
 		}
 		if err := a.Store.UpdateUserPassword(r.Context(), u.ID, hash); err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
+			return loginResponse{}, &loginError{status: http.StatusInternalServerError, message: err.Error()}
 		}
 		u.MustResetPassword = false
-	} else {
-		if !a.Auth.VerifyPassword(u.PasswordHash, req.Password) {
-			writeErr(w, http.StatusUnauthorized, "用户名或密码错误")
-			return
-		}
+	} else if !a.Auth.VerifyPassword(u.PasswordHash, req.Password) {
+		return loginResponse{}, &loginError{status: http.StatusUnauthorized, message: "用户名或密码错误"}
 	}
 
 	tok, err := a.Auth.IssueSessionCookie(w, r, u.ID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
+		return loginResponse{}, &loginError{status: http.StatusInternalServerError, message: err.Error()}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"token": tok,
-		"user":  u,
-	})
+	return loginResponse{Token: tok, User: u}, nil
 }
 
 func (a *API) Logout(w http.ResponseWriter, r *http.Request) {
@@ -240,29 +263,55 @@ func (a *API) UpsertUser(w http.ResponseWriter, r *http.Request) {
 
 // --- Works, Detail, State, Tags, Manual Edit ---
 
-func (a *API) ListWorks(w http.ResponseWriter, r *http.Request) {
-	user := UserFromContext(r.Context())
+func requestedWorkSource(w http.ResponseWriter, r *http.Request) (db.WorkSource, bool) {
+	source, valid := parseWorkSource(r.URL.Query().Get("source"))
+	if !valid {
+		writeErr(w, http.StatusBadRequest, "source must be all, asmrone, or asmr18")
+	}
+	return source, valid
+}
+
+func parseWorkSource(value string) (db.WorkSource, bool) {
+	switch source := db.WorkSource(value); source {
+	case db.AllWorkSources, "all":
+		return db.AllWorkSources, true
+	case db.ASMRoneSource, db.ASMR18Source:
+		return source, true
+	default:
+		return db.AllWorkSources, false
+	}
+}
+
+func (a *API) listWorkOptions(r *http.Request, source db.WorkSource) db.ListWorksOptions {
 	q := r.URL.Query()
 	page, _ := strconv.Atoi(q.Get("page"))
 	pageSize, _ := strconv.Atoi(q.Get("page_size"))
 	storageID, _ := strconv.ParseInt(q.Get("storage_id"), 10, 64)
 	sortDesc := q.Get("sort_desc") != "false" && q.Get("sort_desc") != "0"
-	ageMode := a.effectiveAgeMode(r)
-
-	items, total, err := a.Store.ListWorks(r.Context(), db.ListWorksOptions{
-		UserID:       user.ID,
+	return db.ListWorksOptions{
 		Page:         page,
 		PageSize:     pageSize,
 		SortBy:       q.Get("sort_by"),
 		SortDesc:     sortDesc,
-		AgeMode:      ageMode,
+		AgeMode:      a.effectiveAgeMode(r),
+		Source:       source,
 		Circle:       q.Get("circle"),
 		VA:           q.Get("va"),
 		Tag:          q.Get("tag"),
 		Progress:     q.Get("progress"),
 		StorageID:    storageID,
 		SubtitleOnly: q.Get("subtitle_only") == "1" || q.Get("subtitle_only") == "true",
-	})
+	}
+}
+
+func (a *API) ListWorks(w http.ResponseWriter, r *http.Request) {
+	source, valid := requestedWorkSource(w, r)
+	if !valid {
+		return
+	}
+	opts := a.listWorkOptions(r, source)
+	opts.UserID = UserFromContext(r.Context()).ID
+	items, total, err := a.Store.ListWorks(r.Context(), opts)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -271,15 +320,19 @@ func (a *API) ListWorks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":     items,
 		"total":     total,
-		"page":      max(1, page),
-		"page_size": max(1, pageSize),
-		"age_mode":  ageMode,
+		"page":      max(1, opts.Page),
+		"page_size": max(1, opts.PageSize),
+		"age_mode":  opts.AgeMode,
 	})
 }
 
 func (a *API) ListFacets(w http.ResponseWriter, r *http.Request) {
+	source, valid := requestedWorkSource(w, r)
+	if !valid {
+		return
+	}
 	ageMode := a.effectiveAgeMode(r)
-	circles, vas, tags, err := a.Store.ListFacets(r.Context(), ageMode)
+	circles, vas, tags, err := a.Store.ListFacets(r.Context(), ageMode, source)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -291,10 +344,9 @@ func (a *API) ListFacets(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GetWork returns work detail, playback positions and the track tree as JSON.
 func (a *API) GetWork(w http.ResponseWriter, r *http.Request) {
-	user := UserFromContext(r.Context())
-	workno := r.PathValue("workno")
-	detail, err := a.Store.GetWorkDetail(r.Context(), workno, user.ID)
+	detail, err := a.loadWorkDetail(r)
 	if errors.Is(err, db.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "work not found")
 		return
@@ -303,12 +355,23 @@ func (a *API) GetWork(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
+func (a *API) loadWorkDetail(r *http.Request) (*db.WorkDetail, error) {
+	ctx := r.Context()
+	user := UserFromContext(ctx)
+	workno := r.PathValue("workno")
+	detail, err := a.Store.GetWorkDetail(ctx, workno, user.ID)
+	if err != nil {
+		return nil, err
+	}
 
 	// Lazy-load remote tracks from asmr.one on first open if work has 0 local/cached tracks
 	if len(detail.Tracks) == 0 && a.Cfg.Snapshot().AsmrOneEnabled && r.URL.Query().Get("skip_remote_tracks") != "1" {
 		if asmrClient, cErr := scrape.NewAsmrOneClient(a.Cfg); cErr == nil {
-			if n, trErr := scrape.SyncWorkRemoteTracks(r.Context(), a.Store, asmrClient, detail.Workno, detail.AsmrOneID); trErr == nil && n > 0 {
-				if refreshed, rErr := a.Store.GetWorkDetail(r.Context(), workno, user.ID); rErr == nil {
+			if n, trErr := scrape.SyncWorkRemoteTracks(ctx, a.Store, asmrClient, detail.Workno, detail.AsmrOneID); trErr == nil && n > 0 {
+				if refreshed, rErr := a.Store.GetWorkDetail(ctx, workno, user.ID); rErr == nil {
 					detail = refreshed
 				}
 			}
@@ -316,7 +379,7 @@ func (a *API) GetWork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Annotate HasSubtitle on local tracks & tree nodes (§8)
-	storages, _ := a.Store.ListStorages(r.Context())
+	storages, _ := a.Store.ListStorages(ctx)
 	rootByID := make(map[int64]string, len(storages))
 	for _, st := range storages {
 		if st.Kind == "local" {
@@ -339,7 +402,7 @@ func (a *API) GetWork(w http.ResponseWriter, r *http.Request) {
 	}
 	annotateTreeSubtitles(detail.Tree, hasSubByTrackID)
 
-	writeJSON(w, http.StatusOK, detail)
+	return detail, nil
 }
 
 func (a *API) SyncWorkTracks(w http.ResponseWriter, r *http.Request) {
@@ -481,61 +544,60 @@ func (a *API) UpdateWorkTags(w http.ResponseWriter, r *http.Request) {
 // --- Search & Reindex ---
 
 func (a *API) SearchWorks(w http.ResponseWriter, r *http.Request) {
-	user := UserFromContext(r.Context())
 	qStr := strings.TrimSpace(r.URL.Query().Get("q"))
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
-	ageMode := a.effectiveAgeMode(r)
-
 	if qStr == "" {
 		a.ListWorks(w, r)
 		return
 	}
 
-	sres, _ := a.Search.Search(qStr, 500)
-	if sres != nil && sres.Degraded {
-		items, total, err := a.Store.ListWorks(r.Context(), db.ListWorksOptions{
-			UserID:    user.ID,
-			Page:      page,
-			PageSize:  pageSize,
-			AgeMode:   ageMode,
-			QueryLike: qStr,
-			SortDesc:  true,
-		})
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"items":         items,
-			"total":         total,
-			"degraded":      true,
-			"needs_reindex": true,
-			"warning":       sres.Warning,
-			"age_mode":      ageMode,
-		})
+	source, valid := requestedWorkSource(w, r)
+	if !valid {
 		return
 	}
-
-	items, total, err := a.Store.ListWorks(r.Context(), db.ListWorksOptions{
-		UserID:   user.ID,
-		Page:     page,
-		PageSize: pageSize,
-		AgeMode:  ageMode,
-		Worknos:  sres.Worknos,
-		SortDesc: true,
-	})
+	opts := a.listWorkOptions(r, source)
+	opts.UserID = UserFromContext(r.Context()).ID
+	items, total, result, err := a.searchWorks(r.Context(), qStr, opts)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"items":         items,
 		"total":         total,
-		"degraded":      false,
-		"needs_reindex": false,
-		"age_mode":      ageMode,
-	})
+		"degraded":      result.Degraded,
+		"needs_reindex": result.NeedsReindex,
+		"age_mode":      opts.AgeMode,
+	}
+	if result.Degraded {
+		response["warning"] = result.Warning
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (a *API) searchWorks(ctx context.Context, query string, opts db.ListWorksOptions) ([]db.Work, int, *search.SearchResult, error) {
+	var worknos []string
+	if opts.Source != db.AllWorkSources {
+		var err error
+		worknos, err = a.Store.ListMatchingWorknos(ctx, opts)
+		if err != nil {
+			return nil, 0, nil, err
+		}
+	}
+	result, err := a.Search.SearchWithinWorks(ctx, query, 500, worknos)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+
+	if result.Degraded {
+		opts.QueryLike = query
+	} else {
+		opts.Worknos = result.Worknos
+	}
+	items, total, err := a.Store.ListWorks(ctx, opts)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	return items, total, result, nil
 }
 
 func (a *API) Reindex(w http.ResponseWriter, r *http.Request) {
@@ -565,6 +627,10 @@ func (a *API) StreamTrack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rt.IsRemote && rt.StreamURL != "" {
+		if rt.StorageKind == "asmr18" {
+			_ = stream.ProxyHLS(w, r, rt.StreamURL, a.Cfg.Snapshot().ScraperProxy)
+			return
+		}
 		_ = stream.ProxyRemoteAudio(w, r, rt.StreamURL, rt.RelPath, a.Cfg.Snapshot().ScraperProxy)
 		return
 	}
@@ -840,10 +906,10 @@ func (a *API) ListHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items":     items,
-		"total":     total,
-		"age_mode":  ageMode,
-		"enabled":   a.Cfg.Snapshot().HistoryEnabled,
+		"items":    items,
+		"total":    total,
+		"age_mode": ageMode,
+		"enabled":  a.Cfg.Snapshot().HistoryEnabled,
 	})
 }
 

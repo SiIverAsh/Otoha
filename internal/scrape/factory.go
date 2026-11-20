@@ -1,6 +1,7 @@
 package scrape
 
 import (
+	"net/http"
 	"time"
 
 	"github.com/SiIverAsh/otoha/internal/asmrone"
@@ -11,6 +12,13 @@ import (
 // NewClient builds the DLsite client with the optional asmr.one Tier-4 fallback attached.
 // minInterval overrides cfg.ScraperIntervalSec when > 0 (single-work UI scrapes use a short one).
 func NewClient(cfg *config.Config, cache *dlsite.Cache, minInterval time.Duration) (*dlsite.Client, error) {
+	return NewClientWithTransport(cfg, cache, minInterval, nil)
+}
+
+// NewClientWithTransport injects the same HTTP transport into the primary and
+// fallback clients. When supplied, that transport owns global rate limiting,
+// including retries, redirects, and cover requests from either source.
+func NewClientWithTransport(cfg *config.Config, cache *dlsite.Cache, minInterval time.Duration, transport http.RoundTripper) (*dlsite.Client, error) {
 	snap := cfg.Snapshot()
 	if minInterval <= 0 {
 		minInterval = time.Duration(snap.ScraperIntervalSec * float64(time.Second))
@@ -24,20 +32,29 @@ func NewClient(cfg *config.Config, cache *dlsite.Cache, minInterval time.Duratio
 		MinInterval: minInterval,
 		Cache:       cache,
 		CoversDir:   cfg.CoversDir(),
+		Transport:   transport,
 	}
 
-	if minInterval > 0 && minInterval <= 200*time.Millisecond {
+	if transport != nil {
+		opts.MinInterval = time.Nanosecond
+		opts.CompleteMetadata = true
+	} else if minInterval > 0 && minInterval <= 200*time.Millisecond {
 		opts.RequestTimeout = 6 * time.Second
 		opts.MaxRetries = 1
 	}
 
 	if snap.AsmrOneEnabled {
+		fallbackInterval := time.Duration(snap.AsmrOneIntervalSec * float64(time.Second))
+		if transport != nil {
+			fallbackInterval = time.Nanosecond
+		}
 		fb, err := asmrone.New(asmrone.Options{
 			BaseURLs:    snap.AsmrOneBaseURLs,
 			Locale:      snap.ScraperLocale,
 			UserAgent:   snap.ScraperUserAgent,
 			ProxyURL:    snap.ScraperProxy,
-			MinInterval: time.Duration(snap.AsmrOneIntervalSec * float64(time.Second)),
+			MinInterval: fallbackInterval,
+			Transport:   transport,
 		})
 		if err != nil {
 			return nil, err
