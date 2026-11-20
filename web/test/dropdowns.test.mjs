@@ -15,6 +15,7 @@ class TestElement extends EventTarget {
   offsetTop = 0;
   clientHeight = 120;
   scrollTop = 0;
+  animations = [];
 
   constructor(tag, document) {
     super();
@@ -29,6 +30,7 @@ class TestElement extends EventTarget {
   focus() { this.ownerDocument.activeElement = this; }
   insertAdjacentHTML() {}
   getBoundingClientRect() { return { left: 24, top: 50, bottom: 90 }; }
+  getAnimations() { return this.animations; }
 
   before(element) {
     const parent = this.parentElement;
@@ -228,4 +230,62 @@ test("opening another dropdown and Escape close the previous menu, and chapter c
   assert.deepEqual(positions, ["12"]);
   assert.equal(chapter.value, "");
   assert.equal(chapterTrigger.querySelector(".dropdown-caption").textContent, "跳转章节");
+});
+
+test("a dismissed menu stops receiving events while its exit finishes", async (context) => {
+  context.after(() => closeDropdown(false, { immediate: true }));
+  const { document, addSelect } = fixture();
+  const select = addSelect("filter-tag", "标签", [
+    { label: "全部标签", value: "" },
+    { label: "雨声", value: "rain" },
+  ]);
+  enhanceDropdowns(document.body, "");
+  const trigger = document.body.querySelector("#filter-tag-trigger");
+  send(trigger, "click");
+  const menu = document.body.querySelector(".dropdown-menu");
+  const { promise: finished, resolve } = Promise.withResolvers();
+  menu.animations = [{ finished }];
+
+  send(menu, "keydown", { key: "Escape" });
+  assert.equal(menu.isConnected, true);
+  assert.equal(menu.inert, true);
+  assert.equal(trigger.getAttribute("aria-expanded"), "false");
+  assert.equal(document.activeElement, trigger);
+  send(menu, "click", { target: menu.children[1] });
+  assert.equal(select.value, "");
+
+  resolve();
+  await Promise.allSettled([finished]);
+  assert.equal(menu.isConnected, false);
+});
+
+test("a fading menu cannot outlive its anchor or affect a new dropdown", async (context) => {
+  context.after(() => closeDropdown(false, { immediate: true }));
+  const { document, addSelect } = fixture();
+  addSelect("filter-tag", "标签", [{ label: "全部标签", value: "" }]);
+  addSelect("filter-circle", "社团", [{ label: "全部社团", value: "" }]);
+  enhanceDropdowns(document.body, "");
+  const tagTrigger = document.body.querySelector("#filter-tag-trigger");
+  const circleTrigger = document.body.querySelector("#filter-circle-trigger");
+  send(tagTrigger, "click");
+  const first = document.body.querySelector(".dropdown-menu");
+  const { promise: finished, resolve } = Promise.withResolvers();
+  first.animations = [{ finished }];
+  send(tagTrigger, "click");
+  assert.equal(first.isConnected, true);
+
+  tagTrigger.parentElement.remove();
+  enhanceDropdowns(document.body, "");
+  assert.equal(first.isConnected, false);
+  send(circleTrigger, "click");
+  const second = document.body.querySelector(".dropdown-menu");
+  resolve();
+  await Promise.allSettled([finished]);
+  assert.equal(second.isConnected, true);
+  assert.equal(circleTrigger.getAttribute("aria-expanded"), "true");
+
+  second.animations = [{ finished: new Promise(() => {}) }];
+  send(document.defaultView, "resize");
+  assert.equal(second.isConnected, false);
+  assert.equal(circleTrigger.getAttribute("aria-expanded"), "false");
 });

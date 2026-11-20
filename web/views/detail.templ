@@ -68,9 +68,13 @@ templ WorkDrawer(detail *db.WorkDetail, payload string, editing bool) {
 			</div>
 		</div>
 		@drawerHeader(detail)
-		if editing {
-			@drawerMetadataEditor(detail)
-		}
+		<div id="drawer-metadata-editor" class="disclosure" aria-hidden={ fmt.Sprint(!editing) } inert?={ !editing }>
+			<div class="disclosure-content">
+				if editing {
+					@drawerMetadataEditor(detail)
+				}
+			</div>
+		</div>
 		@drawerPersonalState(detail)
 		<div class="drawer-section">
 			<div class="drawer-section-title">
@@ -265,13 +269,15 @@ templ drawerTrackNodes(nodes []*db.TrackTreeNode, workno string, parentRel strin
 					data-folder-key={ workno + ":" + node.RelPath }
 					style="background:transparent;border:0;max-width:100%;text-align:left;"
 				>
-					<span data-folder-chevron>▾</span> 📁 { node.Name }
+					<span data-folder-chevron aria-hidden="true">▸</span> 📁 { node.Name }
 					if hlsFolder(node.Children) {
 						<span class="badge badge-format" title="通过 HLS 流播放">HLS</span>
 					}
 				</button>
-				<div class="tree-folder-children">
-					@drawerTrackNodes(node.Children, workno, node.RelPath)
+				<div class="tree-folder-children disclosure">
+					<div class="disclosure-content">
+						@drawerTrackNodes(node.Children, workno, node.RelPath)
+					</div>
 				</div>
 			</div>
 		} else if node.Track != nil {

@@ -7,10 +7,10 @@ import {
   isFavorite,
   isLibraryPersistent,
   refreshLibrary,
-  renderPlaylistPicker,
   renderPlaylists,
   setLibraryUser,
   showPlaylistPicker,
+  syncPlaylistForms,
   syncPlaylistPicker,
   toggleFavorite,
 } from "./library.js";
@@ -469,6 +469,7 @@ async function resetPlayer() {
   await stopCurrentTrack();
   clearPlaybackSource();
   pendingSeek = null;
+  closePlayerOverlay(false);
   setSleepTimer(0);
   Object.assign(state.player, {
     workno: "",
@@ -749,6 +750,7 @@ function captureDrawerState(drawer) {
   return {
     workno: drawer.dataset.workno,
     scrollTop: drawer.scrollTop,
+    editorOpen: isDrawerEditorOpen(),
     motion: drawerMotion && {
       from: drawerMotion.from,
       elapsed: drawerMotion.animation.currentTime ?? 0,
@@ -776,8 +778,56 @@ function syncDrawerMotion(previous) {
   }
 }
 
+const settingsDisclosureMotion = new WeakMap();
+
+function toggleSettingsDisclosure(summary) {
+  const section = summary.parentElement;
+  const content = summary.nextElementSibling;
+  const opening = !section.open || section.hasAttribute("data-closing");
+  const previous = settingsDisclosureMotion.get(section);
+  const from = section.getBoundingClientRect().height;
+  settingsDisclosureMotion.delete(section);
+  previous?.cancel();
+
+  const finish = () => {
+    section.open = opening;
+    section.removeAttribute("data-disclosing");
+    section.removeAttribute("data-closing");
+    summary.removeAttribute("aria-expanded");
+    content.inert = false;
+  };
+  section.open = opening;
+  const to = section.getBoundingClientRect().height;
+  if (reducedMotion.matches || from === to) {
+    finish();
+    return;
+  }
+
+  section.open = true;
+  section.setAttribute("data-disclosing", "");
+  section.toggleAttribute("data-closing", !opening);
+  summary.setAttribute("aria-expanded", String(opening));
+  content.inert = !opening;
+  const animation = section.animate(
+    [{ height: `${from}px` }, { height: `${to}px` }],
+    { duration: 240, easing: DRAWER_ENTER.easing, fill: "both" },
+  );
+  settingsDisclosureMotion.set(section, animation);
+  const settle = () => {
+    if (settingsDisclosureMotion.get(section) !== animation) return;
+    settingsDisclosureMotion.delete(section);
+    finish();
+    animation.cancel();
+  };
+  animation.finished.then(settle, settle);
+}
+
 reducedMotion.addEventListener("change", () => {
-  if (reducedMotion.matches) drawerMotion?.animation.finish();
+  if (!reducedMotion.matches) return;
+  drawerMotion?.animation.finish();
+  for (const section of document.querySelectorAll(".settings-page details[data-disclosing]")) {
+    settingsDisclosureMotion.get(section)?.finish();
+  }
 });
 
 document.addEventListener("keydown", (e) => {
@@ -786,6 +836,10 @@ document.addEventListener("keydown", (e) => {
     if (closePlaylistPicker()) {
       e.preventDefault();
       render();
+      return;
+    }
+    if (document.getElementById("playlist-picker")?.open) {
+      e.preventDefault();
       return;
     }
     if (closeDropdown(true)) {
@@ -1018,27 +1072,36 @@ function renderQueueDrawer() {
   `;
 }
 
-function renderSleepMenu() {
+function renderSleepChoices() {
   const deadline = state.player.sleepDeadline;
-  if (!state.player.sleepMenuOpen) return "";
   const time = deadline ? new Date(deadline).toLocaleTimeString("zh-CN", {
     hour: "2-digit",
     minute: "2-digit",
   }) : "";
   return `
-    <div class="player-timer-menu" id="player-timer-menu" aria-label="睡眠定时">
-      <strong>${deadline ? `将在 ${time} 暂停` : "睡眠定时"}</strong>
-      ${[5, 15, 30, 60].map((minutes) => `<button type="button" data-action="set-sleep-timer" data-minutes="${minutes}">${minutes} 分钟</button>`).join("")}
-      ${deadline ? '<button type="button" data-action="set-sleep-timer" data-minutes="0">取消定时</button>' : ""}
-    </div>
+    <strong>${deadline ? `将在 ${time} 暂停` : "睡眠定时"}</strong>
+    ${[5, 15, 30, 60].map((minutes) => `<button type="button" data-action="set-sleep-timer" data-minutes="${minutes}">${minutes} 分钟</button>`).join("")}
+    ${deadline ? '<button type="button" data-action="set-sleep-timer" data-minutes="0">取消定时</button>' : ""}
   `;
+}
+
+function setSleepMenuOpen(open, restoreFocus = true) {
+  if (state.player.sleepMenuOpen === open) return;
+  state.player.sleepMenuOpen = open;
+  const menu = document.getElementById("player-timer-menu");
+  const trigger = document.getElementById("player-timer-trigger");
+  trigger?.setAttribute("aria-expanded", String(open));
+  if (!open && restoreFocus) trigger?.focus({ preventScroll: true });
+  if (!menu) return;
+  if (open) menu.innerHTML = renderSleepChoices();
+  menu.inert = !open;
+  menu.setAttribute("aria-hidden", String(!open));
 }
 
 function setSleepTimer(minutes) {
   const p = state.player;
   clearTimeout(sleepTimer);
   sleepTimer = null;
-  p.sleepMenuOpen = false;
   p.sleepDeadline = 0;
   if (minutes === 0) return;
   const delay = minutes * 60_000;
@@ -1056,7 +1119,9 @@ function setQueueOpen(open, restoreFocus = true) {
   const drawer = document.getElementById("player-queue");
   const scrim = document.getElementById("queue-scrim");
   const trigger = document.querySelector('#player-bar [data-action="toggle-queue"]');
-  if (!open && drawer?.querySelector('.dropdown-trigger[aria-expanded="true"]')) closeDropdown();
+  if (!open && drawer?.querySelector('.dropdown-trigger[aria-expanded="true"]')) {
+    closeDropdown(false, { immediate: true });
+  }
 
   state.player.queueOpen = open;
   trigger?.setAttribute("aria-expanded", String(open));
@@ -1075,11 +1140,7 @@ function closePlayerOverlay(restoreFocus = true) {
     return true;
   }
   if (!state.player.sleepMenuOpen) return false;
-  state.player.sleepMenuOpen = false;
-  document.querySelector(".player-timer-menu")?.remove();
-  const trigger = document.querySelector('#player-bar [data-action="toggle-sleep-menu"]');
-  trigger?.setAttribute("aria-expanded", "false");
-  if (restoreFocus) trigger?.focus({ preventScroll: true });
+  setSleepMenuOpen(false, restoreFocus);
   return true;
 }
 
@@ -1146,7 +1207,7 @@ function renderPlayerHTML() {
 
         <div class="player-tools">
           ${renderPlayerButton("toggle-player-subtitles", "captions", "字幕", `aria-pressed="${p.showSubtitles}"`)}
-          ${renderPlayerButton("toggle-sleep-menu", "timer", "睡眠定时", `aria-expanded="${p.sleepMenuOpen}" aria-controls="player-timer-menu"`, p.sleepDeadline ? "active" : "")}
+          ${renderPlayerButton("toggle-sleep-menu", "timer", "睡眠定时", `id="player-timer-trigger" aria-expanded="${p.sleepMenuOpen}" aria-controls="player-timer-menu"`, p.sleepDeadline ? "active" : "")}
           ${renderPlayerButton("toggle-queue", "queue", "播放队列", `aria-expanded="${p.queueOpen}" aria-controls="player-queue"`)}
           <div class="player-volume">
             ${renderPlayerButton("toggle-mute", muted ? "volume-off" : "volume", muted ? "取消静音" : "静音", `aria-pressed="${muted}"`)}
@@ -1154,7 +1215,10 @@ function renderPlayerHTML() {
           </div>
           ${renderPlayerButton("toggle-player-collapse", "chevron-down", "收起播放栏",
             'id="player-collapse" aria-controls="player-bar" aria-expanded="true"', "player-collapse")}
-          ${renderSleepMenu()}
+        </div>
+        <div class="player-timer-menu" id="player-timer-menu" aria-label="睡眠定时"
+          aria-hidden="${!p.sleepMenuOpen}" ${p.sleepMenuOpen ? "" : "inert"}>
+          ${renderSleepChoices()}
         </div>
       </footer>
       <aside id="player-dock" class="player-dock" aria-label="迷你播放器"
@@ -1178,22 +1242,28 @@ function renderPlayerHTML() {
 function renderPlayerOnly() {
   const existing = document.querySelector(".player-shell");
   if (!existing) return;
-  if (existing.querySelector('.dropdown-trigger[aria-expanded="true"]')) closeDropdown(true);
+  if (existing.querySelector('.dropdown-trigger[aria-expanded="true"]')) {
+    closeDropdown(true, { immediate: true });
+  }
   const focusedButton = captureButtonFocus(existing);
   const focusedField = existing.contains(document.activeElement) ? document.activeElement.id : "";
   const queueScrollTop = existing.querySelector(".queue-items")?.scrollTop;
   const template = document.createElement("template");
   template.innerHTML = renderPlayerHTML();
   const player = template.content.firstElementChild;
-  for (const selector of ["#player-bar", "#player-dock", "#player-sub"]) {
+  // Keep animated surfaces mounted while refreshing their controls and content.
+  for (const selector of [".player-info", ".player-center", ".player-tools", "#player-sub"]) {
     existing.querySelector(selector).replaceWith(player.querySelector(selector));
   }
-  // Keep the sliding surfaces mounted while playback updates the queue.
-  const queueDrawer = existing.querySelector(".queue-drawer");
-  queueDrawer.replaceChildren(...player.querySelector(".queue-drawer").childNodes);
+  for (const selector of ["#player-dock", "#player-queue"]) {
+    existing.querySelector(selector).replaceChildren(...player.querySelector(selector).childNodes);
+  }
+  if (state.player.sleepMenuOpen) {
+    existing.querySelector("#player-timer-menu").replaceChildren(...player.querySelector("#player-timer-menu").childNodes);
+  }
   bindPlayerInputs();
   enhanceDropdowns(existing, icon("chevron-down"));
-  const queue = queueDrawer.querySelector(".queue-items");
+  const queue = existing.querySelector(".queue-items");
   if (queue && queueScrollTop !== undefined) queue.scrollTop = queueScrollTop;
   restoreButtonFocus(existing, focusedButton);
   if (focusedField) document.getElementById(focusedField)?.focus({ preventScroll: true });
@@ -1246,7 +1316,9 @@ function syncSidebarPresentation() {
 function captureDrawerInputs(drawer) {
   if (!drawer || drawer.dataset.workno !== state.detail?.workno || drawerClosing) return [];
   const inputs = [];
+  const editor = document.getElementById("drawer-metadata-editor");
   for (const field of drawer.querySelectorAll("input[id], select[id], textarea[id]")) {
+    if (editor?.inert && editor.contains(field)) continue;
     const initial = field.tagName === "SELECT"
       ? (field.querySelector("option[selected]") ?? field.options[0]).value
       : field.defaultValue;
@@ -1326,24 +1398,43 @@ function syncNavigation(page) {
 
 let libraryHTML;
 let libraryRegion;
+let libraryExit;
 
 function renderBrowserLibrary() {
   const region = document.getElementById("browser-library");
   if (!region) {
     libraryRegion = null;
     libraryHTML = null;
+    libraryExit = null;
     return;
   }
   const warning = isLibraryPersistent() ? "" : '<p class="banner-warn" role="status">浏览器存储不可用。收藏和播放列表仅保留在本次会话中。</p>';
   const html = warning + (state.tab === "favorites"
     ? renderFavoritesTab()
     : renderPageHeading("播放列表") + renderPlaylists(esc, icon));
-  if (region !== libraryRegion || html !== libraryHTML) {
-    region.innerHTML = html;
-    window.htmx.process(region);
-    libraryRegion = region;
-    libraryHTML = html;
+  if (region === libraryRegion) {
+    syncPlaylistForms(region);
+    if (html === libraryHTML) return;
+    // A save can change the list as it closes its form. Keep the exit in place.
+    const exit = Array.from(region.querySelectorAll('.playlist-form-disclosure[aria-hidden="true"]'))
+      .flatMap((panel) => panel.getAnimations())
+      .find((motion) => motion.transitionProperty === "grid-template-rows" && motion.playState !== "finished");
+    if (exit) {
+      if (exit !== libraryExit) {
+        libraryExit = exit;
+        exit.finished.then(renderBrowserLibrary, renderBrowserLibrary);
+      }
+      return;
+    }
   }
+  const focus = region.contains(document.activeElement) ? document.activeElement.id : "";
+  region.innerHTML = html;
+  window.htmx.process(region);
+  libraryRegion = region;
+  libraryHTML = html;
+  libraryExit = null;
+  syncPlaylistForms(region);
+  if (focus) document.getElementById(focus)?.focus({ preventScroll: true });
 }
 
 function syncFavorites() {
@@ -1374,25 +1465,14 @@ function syncFolders() {
   for (const label of document.querySelectorAll(".drawer [data-folder-key]")) {
     const collapsed = Boolean(state.collapsedFolders[label.dataset.folderKey]);
     label.setAttribute("aria-expanded", String(!collapsed));
-    label.nextElementSibling.hidden = collapsed;
-    label.querySelector("[data-folder-chevron]").textContent = collapsed ? "▸" : "▾";
+    const content = label.nextElementSibling;
+    content.inert = collapsed;
+    content.setAttribute("aria-hidden", String(collapsed));
   }
 }
 
-function renderPlaylistOverlay() {
-  const region = document.getElementById("playlist-picker-region");
-  const html = renderPlaylistPicker(esc, icon);
-  const input = region.contains(document.activeElement) ? document.activeElement : null;
-  const draft = input?.value;
-  const selection = input && [input.selectionStart, input.selectionEnd];
-  region.innerHTML = html;
-  syncPlaylistPicker(render);
-  const field = input?.id && document.getElementById(input.id);
-  if (field && draft !== undefined) {
-    field.value = draft;
-    field.focus({ preventScroll: true });
-    if (Number.isInteger(selection[0])) field.setSelectionRange(...selection);
-  }
+function isDrawerEditorOpen() {
+  return document.getElementById("drawer-metadata-editor")?.inert === false;
 }
 
 function render() {
@@ -1409,7 +1489,7 @@ function render() {
   syncSidebarPresentation();
   syncTaskIndicator();
   renderBrowserLibrary();
-  renderPlaylistOverlay();
+  syncPlaylistPicker(document.getElementById("playlist-picker-region"), esc, icon, render);
   syncFavorites();
   syncWorkSelection();
   syncFolders();
@@ -1485,7 +1565,7 @@ function beforeDrawerSwap(detail) {
     focusedButton: drawer ? captureButtonFocus(drawer) : null,
   };
   cancelDrawerMotion();
-  closeDropdown(true);
+  closeDropdown(true, { immediate: true });
 }
 
 function afterDrawerSwap(target) {
@@ -1497,6 +1577,13 @@ function afterDrawerSwap(target) {
   state.detail = JSON.parse(drawer.dataset.detail);
   state.selectedWorkno = state.detail.workno;
   syncDrawerMotion(pose);
+  const editor = document.getElementById("drawer-metadata-editor");
+  const hadOpenEditor = pose?.workno === drawer.dataset.workno && pose.editorOpen;
+  if (editor && !editor.inert && !hadOpenEditor && !reducedMotion.matches) {
+    editor.setAttribute("aria-hidden", "true");
+    editor.getBoundingClientRect();
+    editor.setAttribute("aria-hidden", "false");
+  }
   if (pose?.workno === drawer.dataset.workno) {
     restoreDrawerInputs(inputs);
     restoreButtonFocus(drawer, focusedButton);
@@ -1529,11 +1616,12 @@ document.addEventListener("htmx:beforeSwap", ({ detail }) => {
     keepDrawer: headers["X-Otoha-Keep-Drawer"] === "1",
     home: elt?.closest('[data-nav-path="/"]'),
     searchDraft: preserveSearch ? search?.value : undefined,
-    openSections: [...detail.target.querySelectorAll(".settings-page details[id][open]")].map(({ id }) => id),
+    openSections: [...detail.target.querySelectorAll(".settings-page details[id][open]:not([data-closing])")]
+      .map(({ id }) => id),
     previousTab: state.tab,
   };
   rememberASMR18Draft();
-  closeDropdown(true);
+  closeDropdown(true, { immediate: true });
 });
 
 document.addEventListener("htmx:afterSwap", ({ detail }) => {
@@ -1664,6 +1752,12 @@ function isWorkDrawerBackground(target) {
 
 document.addEventListener("click", async (e) => {
   if (e.target.closest("a.dlsite-link")) return;
+  const summary = e.target.closest(".settings-page details > summary");
+  if (summary) {
+    e.preventDefault();
+    toggleSettingsDisclosure(summary);
+    return;
+  }
   const target = e.target.closest("[data-action]");
   if (!target) {
     if (state.detail && isWorkDrawerBackground(e.target)) closeWorkDrawer();
@@ -1786,13 +1880,12 @@ document.addEventListener("click", async (e) => {
         break;
       case "toggle-sleep-menu":
         setQueueOpen(false, false);
-        state.player.sleepMenuOpen = !state.player.sleepMenuOpen;
-        renderPlayerOnly();
+        setSleepMenuOpen(!state.player.sleepMenuOpen);
         break;
       case "set-sleep-timer":
+        setSleepMenuOpen(false);
         setSleepTimer(Number(target.dataset.minutes));
         renderPlayerOnly();
-        document.querySelector('[data-action="toggle-sleep-menu"]')?.focus({ preventScroll: true });
         break;
       case "toggle-mute": {
         const muted = audio.muted || audio.volume === 0;
@@ -1820,7 +1913,7 @@ document.addEventListener("click", async (e) => {
           body: { progress, rating, review },
         });
         if (isCurrentWorkDrawer(workno, requestId)) {
-          await openWorkDrawer(workno, { edit: Boolean(document.getElementById("meta-title")), preserveInput: true });
+          await openWorkDrawer(workno, { edit: isDrawerEditorOpen(), preserveInput: true });
         }
         await refreshWorks();
         break;
@@ -1839,14 +1932,22 @@ document.addEventListener("click", async (e) => {
           body: { tags },
         });
         if (isCurrentWorkDrawer(workno, requestId)) {
-          await openWorkDrawer(workno, { edit: Boolean(document.getElementById("meta-title")), preserveInput: true });
+          await openWorkDrawer(workno, { edit: isDrawerEditorOpen(), preserveInput: true });
         }
         await refreshWorks();
         break;
       }
       case "toggle-edit-meta":
         if (state.detail) {
-          await openWorkDrawer(state.detail.workno, { edit: !document.getElementById("meta-title"), preserveInput: true });
+          const editor = document.getElementById("drawer-metadata-editor");
+          if (editor.inert) {
+            await openWorkDrawer(state.detail.workno, { edit: true, preserveInput: true });
+          } else {
+            editor.inert = true;
+            editor.setAttribute("aria-hidden", "true");
+            target.setAttribute("aria-expanded", "false");
+            target.textContent = "编辑";
+          }
         }
         break;
       case "save-meta": {

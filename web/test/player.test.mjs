@@ -17,7 +17,7 @@ const playerScript = new Script(`${source}
   openWorkDrawer = async (workno) => loadWorkDetail(workno);
   ({ audio, player: state.player, playSavedQueue, playQueueIndex, resetPlayer,
     seekTrack, resumeTrack, resumeFromHistory, setSleepTimer, renderPlayerHTML,
-    togglePlayerCollapse, setQueueOpen, renders });
+    togglePlayerCollapse, setQueueOpen, setSleepMenuOpen, closePlayerOverlay, renders });
 `, { filename: "web/src/app.js" });
 
 const firstTrack = {
@@ -256,6 +256,41 @@ function fakePlayerSurface(isHidden) {
     getAttribute: (name) => attributes.get(name),
   };
 }
+
+test("the sleep menu can close and reopen without replacing its animated surface", () => {
+  const menu = fakePlayerSurface(true);
+  const trigger = fakePlayerSurface(false);
+  let focusCount = 0;
+  trigger.focus = () => { focusCount++; };
+  const elements = new Map([
+    ["#player-timer-menu", menu],
+    ["#player-timer-trigger", trigger],
+  ]);
+  const app = createPlayer(undefined, { elements });
+  assertPlayerSurface(app.renderPlayerHTML(), "player-timer-menu", true);
+
+  app.setSleepMenuOpen(true);
+  assertPlayerSurface(app.renderPlayerHTML(), "player-timer-menu", false);
+  assert.equal(menu.inert, false);
+  assert.equal(menu.getAttribute("aria-hidden"), "false");
+  assert.equal(trigger.getAttribute("aria-expanded"), "true");
+  assert.doesNotMatch(menu.innerHTML, /取消定时/);
+  const choices = menu.innerHTML;
+
+  assert.equal(app.closePlayerOverlay(), true);
+  assert.equal(menu.inert, true);
+  assert.equal(menu.getAttribute("aria-hidden"), "true");
+  assert.equal(trigger.getAttribute("aria-expanded"), "false");
+  assert.equal(focusCount, 1);
+  assertPlayerSurface(app.renderPlayerHTML(), "player-timer-menu", true);
+  app.setSleepTimer(15);
+  assert.equal(menu.innerHTML, choices);
+
+  app.setSleepMenuOpen(true);
+  assert.equal(menu.inert, false);
+  assert.match(menu.innerHTML, /取消定时/);
+  assert.equal(app.renders.player, 0);
+});
 
 function queueFixture(isOpen = false) {
   const drawer = { ...fakePlayerSurface(!isOpen), querySelector: () => null };

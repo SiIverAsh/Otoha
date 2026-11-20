@@ -4,6 +4,7 @@ const MENU_MAX_HEIGHT = 360;
 const TYPEAHEAD_TIMEOUT = 600;
 
 let openDropdown = null;
+let closingDropdown = null;
 
 function syncCaption(select, trigger, caption, label) {
   const option = select.selectedOptions[0];
@@ -59,9 +60,11 @@ function positionMenu(trigger, menu) {
   const below = bottom - anchor.bottom - MENU_GAP;
   const above = anchor.top - VIEWPORT_MARGIN - MENU_GAP;
   const openAbove = below < MENU_MAX_HEIGHT && below < above;
+  menu.dataset.side = openAbove ? "above" : "below";
   menu.style.maxHeight = `${Math.max(0, Math.min(MENU_MAX_HEIGHT, openAbove ? above : below))}px`;
   menu.style.left = `${left}px`;
-  menu.style.top = `${openAbove ? anchor.top - MENU_GAP - menu.offsetHeight : anchor.bottom + MENU_GAP}px`;
+  const height = menu.offsetHeight;
+  menu.style.top = `${openAbove ? anchor.top - MENU_GAP - height : anchor.bottom + MENU_GAP}px`;
 }
 
 function syncOptionMotion(item, visible) {
@@ -145,21 +148,43 @@ function handleMenuKey(event, dropdown) {
   activateOption(dropdown, index);
 }
 
-/** Dismiss the open listbox and optionally return focus to its trigger. */
-export function closeDropdown(restoreFocus = false) {
+function removeClosingDropdown() {
+  closingDropdown?.menu.remove();
+  closingDropdown = null;
+}
+
+/** Dismiss the listbox, optionally restoring focus or bypassing the exit. */
+export function closeDropdown(restoreFocus = false, { immediate = false } = {}) {
+  if (immediate) removeClosingDropdown();
   if (!openDropdown) return false;
-  const { menu, trigger, observer, listeners } = openDropdown;
+  const dropdown = openDropdown;
+  const { menu, trigger, observer, listeners } = dropdown;
   openDropdown = null;
   listeners.abort();
   observer?.disconnect();
-  menu.remove();
   trigger.setAttribute("aria-expanded", "false");
   if (restoreFocus && trigger.isConnected) trigger.focus({ preventScroll: true });
+  if (immediate || !trigger.isConnected) {
+    menu.remove();
+    return true;
+  }
+
+  menu.inert = true;
+  delete menu.dataset.open;
+  const animations = menu.getAnimations();
+  if (animations.length === 0) {
+    menu.remove();
+    return true;
+  }
+  closingDropdown = dropdown;
+  void Promise.allSettled(animations.map((animation) => animation.finished)).then(() => {
+    if (closingDropdown === dropdown) removeClosingDropdown();
+  });
   return true;
 }
 
 function showDropdown(control, preferLast = false) {
-  closeDropdown();
+  closeDropdown(false, { immediate: true });
   const { select, trigger, label, caption } = control;
   if (select.matches(":disabled")) return;
   const document = trigger.ownerDocument;
@@ -183,6 +208,7 @@ function showDropdown(control, preferLast = false) {
   document.body.append(menu);
   trigger.setAttribute("aria-expanded", "true");
   positionMenu(trigger, menu);
+  menu.dataset.open = "";
   const selectedIndex = enabledOptions.findIndex((item) => item.getAttribute("aria-selected") === "true");
   const fallbackIndex = preferLast ? enabledOptions.length - 1 : 0;
   activateOption(dropdown, selectedIndex >= 0 ? selectedIndex : fallbackIndex);
@@ -204,15 +230,16 @@ function showDropdown(control, preferLast = false) {
     if (!menu.contains(target) && !trigger.contains(target) && label?.control !== trigger) closeDropdown();
   }, { capture: true, signal });
   document.addEventListener("scroll", (event) => {
-    if (event.target === document || event.target.contains?.(trigger)) closeDropdown();
+    if (event.target === document || event.target.contains?.(trigger)) closeDropdown(false, { immediate: true });
   }, { capture: true, signal });
-  window.addEventListener("resize", () => closeDropdown(), { signal });
+  window.addEventListener("resize", () => closeDropdown(false, { immediate: true }), { signal });
   menu.focus({ preventScroll: true });
 }
 
 /** Replace each single-select UI while retaining its native form control. */
 export function enhanceDropdowns(root, arrowHTML) {
-  if (openDropdown && !openDropdown.trigger.isConnected) closeDropdown();
+  if (openDropdown && !openDropdown.trigger.isConnected) closeDropdown(false, { immediate: true });
+  if (closingDropdown && !closingDropdown.trigger.isConnected) removeClosingDropdown();
   // A data attribute survives HTMX class settlement without being copied to new selects.
   for (const select of root.querySelectorAll("select[id]:not([multiple]):not([data-dropdown-source])")) {
     if (select.size > 1) continue;

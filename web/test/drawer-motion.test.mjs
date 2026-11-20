@@ -10,7 +10,7 @@ const source = readFileSync(new URL("../src/app.js", import.meta.url), "utf8")
   .replace(/^import \{ closeDropdown, enhanceDropdowns \} from "\.\/dropdowns\.js";\n/m, "")
   .replace(/\nstartApp\(\);\s*$/, "");
 const drawerScript = new Script(`${source}
-  ({ state, openWorkDrawer, closeWorkDrawer });
+  ({ state, openWorkDrawer, closeWorkDrawer, toggleSettingsDisclosure });
 `, { filename: "web/src/app.js" });
 
 const workno = "RJ000001";
@@ -258,4 +258,57 @@ test("reopening a closing drawer enters from its current pose and survives the o
   await setImmediate();
   assert.ok(app.drawer);
   assert.equal(app.state.selectedWorkno, workno);
+});
+
+test("a settings disclosure reverses smoothly and disabled motion uses the native state immediately", async () => {
+  function fixture() {
+    const section = new EventTarget();
+    const summary = new EventTarget();
+    for (const element of [section, summary]) {
+      const attrs = new Set();
+      element.setAttribute = (name) => attrs.add(name);
+      element.removeAttribute = (name) => attrs.delete(name);
+      element.hasAttribute = (name) => attrs.has(name);
+      element.toggleAttribute = (name, enabled) =>
+        enabled ? element.setAttribute(name) : element.removeAttribute(name);
+    }
+    const moves = [];
+    section.open = true;
+    section.animate = (frames, options) => {
+      const animation = createAnimation(frames, options);
+      moves.push(animation);
+      return animation;
+    };
+    section.getBoundingClientRect = () => {
+      const move = moves.at(-1);
+      return { height: !move || move.canceled ? (section.open ? 180 : 36) : 100 };
+    };
+    summary.parentElement = section;
+    summary.nextElementSibling = { inert: false };
+    return { section, summary, moves };
+  }
+
+  const { section, summary, moves } = fixture();
+  const app = loadDrawer();
+  app.toggleSettingsDisclosure(summary);
+  const [closing] = moves;
+  assert.equal(closing.frames[1].height, "36px");
+  assert.equal(section.open, true);
+  assert.equal(summary.nextElementSibling.inert, true);
+
+  app.toggleSettingsDisclosure(summary);
+  const opening = moves.at(-1);
+  assert.equal(closing.canceled, true);
+  assert.equal(opening.frames[0].height, "100px");
+  assert.equal(opening.frames[1].height, "180px");
+  opening.finish();
+  await setImmediate();
+  assert.equal(section.open, true);
+  assert.equal(section.hasAttribute("data-disclosing"), false);
+  assert.equal(summary.nextElementSibling.inert, false);
+
+  const reduced = fixture();
+  loadDrawer({ reducedMotion: true }).toggleSettingsDisclosure(reduced.summary);
+  assert.deepEqual(reduced.moves, []);
+  assert.equal(reduced.section.open, false);
 });

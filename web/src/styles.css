@@ -136,6 +136,24 @@ button:disabled {
   opacity: 0.45;
 }
 
+.disclosure {
+  display: grid;
+  flex-shrink: 0;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transition: grid-template-rows 240ms var(--motion-ease), opacity 180ms ease;
+}
+
+.disclosure[aria-hidden="true"] {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+
+.disclosure-content {
+  min-block-size: 0;
+  overflow: hidden;
+}
+
 @media (prefers-reduced-motion: reduce) {
   button,
   .button-link {
@@ -850,6 +868,7 @@ textarea:focus-visible {
 }
 
 .dropdown-menu {
+  --dropdown-offset: -4px;
   position: fixed;
   z-index: 65;
   width: 25vw;
@@ -863,6 +882,30 @@ textarea:focus-visible {
   border-radius: 10px;
   background: var(--panel);
   box-shadow: 0 8px 24px var(--shadow);
+  opacity: 0;
+  transform: translateY(var(--dropdown-offset)) scale(0.98);
+  transform-origin: top center;
+  transition: opacity 150ms ease, transform 180ms var(--motion-ease);
+}
+
+.dropdown-menu[data-side="above"] {
+  --dropdown-offset: 4px;
+  transform-origin: bottom center;
+}
+
+.dropdown-menu[data-open] {
+  opacity: 1;
+  transform: none;
+}
+
+.dropdown-menu[inert] {
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dropdown-menu {
+    transition: none;
+  }
 }
 
 .dropdown-menu:focus-visible {
@@ -1726,6 +1769,15 @@ button.drawer-original-link {
   user-select: none;
 }
 
+[data-folder-chevron] {
+  display: inline-block;
+  transition: transform 240ms var(--motion-ease);
+}
+
+.tree-folder-label[aria-expanded="true"] [data-folder-chevron] {
+  transform: rotate(90deg);
+}
+
 .tree-track {
   padding: 5px 6px;
   border-radius: 4px;
@@ -1760,6 +1812,12 @@ button.drawer-original-link {
 .track-add-button {
   width: 29px;
   height: 29px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  :is(.track-add-button, [data-action="playlist-create"]):enabled:active {
+    transform: scale(0.93);
+  }
 }
 
 .tree-track-meta {
@@ -2058,6 +2116,8 @@ button.drawer-original-link {
 }
 
 .player-timer-menu {
+  --timer-menu-duration: 180ms;
+  --timer-menu-visibility-delay: 0s;
   position: absolute;
   bottom: calc(100% + 10px);
   right: 18px;
@@ -2069,6 +2129,21 @@ button.drawer-original-link {
   border-radius: 11px;
   background: var(--panel);
   box-shadow: 0 8px 24px var(--shadow);
+  opacity: 1;
+  visibility: visible;
+  transform-origin: right bottom;
+  transform: translateY(0) scale(1);
+  transition: opacity var(--timer-menu-duration) ease,
+    transform var(--timer-menu-duration) var(--motion-ease),
+    visibility 0s var(--timer-menu-visibility-delay);
+}
+
+.player-timer-menu[aria-hidden="true"] {
+  --timer-menu-visibility-delay: var(--timer-menu-duration);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(6px) scale(0.98);
 }
 
 .player-timer-menu button {
@@ -2353,8 +2428,7 @@ button.drawer-original-link {
   height: 16px;
 }
 
-.playlist-sidebar > .playlist-picker-form,
-.playlist-detail > .playlist-picker-form {
+.playlist-form-disclosure .playlist-picker-form {
   margin-bottom: 12px;
 }
 
@@ -2364,6 +2438,13 @@ button.drawer-original-link {
   text-align: center;
 }
 
+.playlist-picker,
+.playlist-picker::backdrop {
+  --picker-duration: 230ms;
+  opacity: 0;
+  transition: opacity var(--picker-duration) ease;
+}
+
 .playlist-picker {
   width: min(430px, calc(100% - 28px));
   max-height: min(80vh, 520px);
@@ -2371,11 +2452,30 @@ button.drawer-original-link {
   padding: 16px;
   color: var(--text);
   box-shadow: 0 12px 42px var(--shadow);
+  transform: translateY(10px) scale(0.98);
+  transition: opacity var(--picker-duration) ease,
+    transform var(--picker-duration) var(--motion-ease);
 }
 
 .playlist-picker::backdrop {
   background: #09081290;
   backdrop-filter: blur(4px);
+}
+
+.playlist-picker[data-visible],
+.playlist-picker[data-visible]::backdrop {
+  opacity: 1;
+}
+
+.playlist-picker[data-visible] {
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .playlist-picker,
+  .playlist-picker::backdrop {
+    transition: none;
+  }
 }
 
 .playlist-picker > p {
@@ -2458,10 +2558,15 @@ button.drawer-original-link {
   border-bottom: 1px solid currentColor;
   color: var(--muted);
   transform: translateY(-50%) rotate(-45deg);
+  transition: transform 240ms var(--motion-ease);
 }
 
-.settings-page details[open] > summary::after {
+.settings-page details[open]:not([data-closing]) > summary::after {
   transform: translateY(-70%) rotate(45deg);
+}
+
+.settings-page details[data-disclosing] {
+  overflow: clip;
 }
 
 .settings-page summary:hover {
@@ -2859,8 +2964,12 @@ button.drawer-original-link {
   .nav-label,
   .page-content,
   .drawer,
+  .disclosure,
+  [data-folder-chevron],
+  .settings-page summary::after,
   .player-bar,
   .player-dock,
+  .player-timer-menu,
   .subtitle-line,
   .queue-scrim,
   .queue-drawer,

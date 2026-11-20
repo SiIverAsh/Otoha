@@ -8,6 +8,7 @@ let library = { favorites: [], playlists: [] };
 let selectedPlaylistId = null;
 let playlistForm = null;
 let pickerTrack = null;
+let pickerHTML = "";
 
 function normalizeWork(work) {
   return {
@@ -179,11 +180,35 @@ function playlistNameForm(mode, label, name, esc) {
     <form class="playlist-picker-form" data-library-form="${mode}">
       <label for="playlist-name-${mode}">${label}</label>
       <input id="playlist-name-${mode}" name="playlist-name" maxlength="${PLAYLIST_NAME_LIMIT}" value="${esc(name)}"
-        placeholder="输入播放列表名称" required ${isPicker ? "" : "data-library-autofocus"} />
+        placeholder="输入播放列表名称" required />
       <button type="submit" class="primary">${isPicker ? "新建并添加" : "保存"}</button>
       ${isPicker ? "" : '<button type="button" data-action="playlist-cancel-form">取消</button>'}
     </form>
   `;
+}
+
+function playlistFormDisclosure(mode, name, esc) {
+  return `<div id="playlist-form-${mode}" class="disclosure playlist-form-disclosure" data-playlist-form="${mode}" aria-hidden="true" inert>
+    <div class="disclosure-content">${playlistNameForm(mode, "列表名称", name, esc)}</div>
+  </div>`;
+}
+
+/** Reconciles the inline forms without replacing their controls or interrupting transitions. */
+export function syncPlaylistForms(region) {
+  for (const panel of region.querySelectorAll(".playlist-form-disclosure")) {
+    const mode = panel.dataset.playlistForm;
+    const trigger = region.querySelector(`[aria-controls="${panel.id}"]`);
+    const isOpen = mode === playlistForm?.mode && (mode !== "rename" || trigger.dataset.playlistId === playlistForm.id);
+    if (panel.getAttribute("aria-hidden") === String(!isOpen)) continue;
+
+    const form = panel.querySelector("form");
+    if (isOpen) form.reset();
+    else if (panel.contains(region.ownerDocument.activeElement)) trigger.focus({ preventScroll: true });
+    panel.setAttribute("aria-hidden", String(!isOpen));
+    panel.inert = !isOpen;
+    trigger.setAttribute("aria-expanded", String(isOpen));
+    form.elements.namedItem("playlist-name").toggleAttribute("data-library-autofocus", isOpen);
+  }
 }
 
 function playlistTrackRows(playlist, esc, icon) {
@@ -220,9 +245,10 @@ export function renderPlaylists(esc, icon) {
       <div class="playlist-sidebar">
         <div class="playlist-heading">
           <h2>我的列表</h2>
-          <button type="button" class="icon-button" data-action="playlist-create" aria-label="新建播放列表" title="新建播放列表">${icon("plus")}</button>
+          <button type="button" class="icon-button" id="playlist-create-trigger" data-action="playlist-create"
+            aria-label="新建播放列表" title="新建播放列表" aria-controls="playlist-form-create" aria-expanded="false">${icon("plus")}</button>
         </div>
-        ${playlistForm?.mode === "create" ? playlistNameForm("create", "列表名称", "", esc) : ""}
+        ${playlistFormDisclosure("create", "", esc)}
         <div class="playlist-index">
           ${library.playlists.map((playlist) => `
             <button type="button" class="playlist-option" data-action="playlist-select" data-playlist-id="${esc(playlist.id)}" aria-pressed="${playlist.id === selected?.id}">
@@ -239,11 +265,12 @@ export function renderPlaylists(esc, icon) {
             <h2>${esc(selected.name)}</h2>
             <div class="playlist-track-actions">
               <button type="button" data-action="playlist-play" data-playlist-id="${id}" data-index="0" ${selected.tracks.length ? "" : "disabled"}>${icon("play")} 播放全部</button>
-              <button type="button" class="icon-button" data-action="playlist-rename" data-playlist-id="${id}" aria-label="重命名" title="重命名">${icon("pencil")}</button>
+              <button type="button" class="icon-button" id="playlist-rename-trigger" data-action="playlist-rename" data-playlist-id="${id}"
+                aria-label="重命名" title="重命名" aria-controls="playlist-form-rename" aria-expanded="false">${icon("pencil")}</button>
               <button type="button" class="icon-button" data-action="playlist-delete" data-playlist-id="${id}" aria-label="删除播放列表" title="删除播放列表">${icon("trash")}</button>
             </div>
           </div>
-          ${playlistForm?.id === selected.id ? playlistNameForm("rename", "列表名称", selected.name, esc) : ""}
+          ${playlistFormDisclosure("rename", selected.name, esc)}
           ${playlistTrackRows(selected, esc, icon)}
         ` : '<p class="playlist-empty">暂无播放列表</p>'}
       </div>
@@ -251,52 +278,109 @@ export function renderPlaylists(esc, icon) {
   `;
 }
 
-/** Renders the track's destination picker when open. */
-export function renderPlaylistPicker(esc, icon) {
+function renderPlaylistPicker(esc, icon) {
   if (!pickerTrack) return "";
   return `
-    <dialog class="playlist-picker" id="playlist-picker" aria-labelledby="playlist-picker-title" aria-describedby="playlist-picker-track">
-      <div class="playlist-heading">
-        <h2 id="playlist-picker-title">添加到播放列表</h2>
-        <button type="button" class="icon-button" data-action="playlist-close-picker" aria-label="关闭" title="关闭" autofocus>${icon("x")}</button>
-      </div>
-      <p id="playlist-picker-track">${esc(trackName(pickerTrack))}</p>
-      <div class="playlist-index">
-        ${library.playlists.map((playlist) => {
-          const isAdded = playlist.tracks.some((track) => track.id === pickerTrack.id);
-          return `
-            <button type="button" class="playlist-option" data-action="playlist-save-track" data-playlist-id="${esc(playlist.id)}" ${isAdded ? "disabled" : ""}>
-              ${icon(isAdded ? "check" : "list-music")}
-              <span>${esc(playlist.name)}</span>
-              <small>${isAdded ? "已添加" : `${playlist.tracks.length} 首`}</small>
-            </button>
-          `;
-        }).join("")}
-      </div>
-      ${playlistNameForm("create-and-add", "新列表名称", "", esc)}
-    </dialog>
+    <div class="playlist-heading">
+      <h2 id="playlist-picker-title">添加到播放列表</h2>
+      <button type="button" class="icon-button" data-action="playlist-close-picker" aria-label="关闭" title="关闭" autofocus>${icon("x")}</button>
+    </div>
+    <p id="playlist-picker-track">${esc(trackName(pickerTrack))}</p>
+    <div class="playlist-index">
+      ${library.playlists.map((playlist) => {
+        const isAdded = playlist.tracks.some((track) => track.id === pickerTrack.id);
+        return `
+          <button type="button" class="playlist-option" data-action="playlist-save-track" data-playlist-id="${esc(playlist.id)}" ${isAdded ? "disabled" : ""}>
+            ${icon(isAdded ? "check" : "list-music")}
+            <span>${esc(playlist.name)}</span>
+            <small>${isAdded ? "已添加" : `${playlist.tracks.length} 首`}</small>
+          </button>
+        `;
+      }).join("")}
+    </div>
+    ${playlistNameForm("create-and-add", "新列表名称", "", esc)}
   `;
 }
 
-/** Opens the rendered picker and gives Escape and the backdrop the same close action. */
-export function syncPlaylistPicker(render) {
-  const dialog = document.getElementById("playlist-picker");
-  if (!dialog || dialog.open) return;
+function removePlaylistPicker(dialog) {
+  dialog.close();
+  dialog.remove();
+}
+
+function dismissPlaylistPicker(dialog) {
+  dialog.inert = true;
+  delete dialog.dataset.visible;
+  const fade = dialog.getAnimations().find((animation) => animation.transitionProperty === "opacity");
+  if (!fade) {
+    removePlaylistPicker(dialog);
+    return;
+  }
+  const finish = () => {
+    if (dialog.isConnected) removePlaylistPicker(dialog);
+  };
+  fade.finished.then(finish, finish);
+}
+
+function updatePlaylistPicker(dialog, html) {
+  const input = dialog.querySelector("input");
+  const draft = input.value;
+  const selection = [input.selectionStart, input.selectionEnd];
+  const active = dialog.ownerDocument.activeElement;
+  dialog.innerHTML = html;
+  const nextInput = dialog.querySelector("input");
+  nextInput.value = draft;
+  if (active === input) {
+    nextInput.focus({ preventScroll: true });
+    nextInput.setSelectionRange(...selection);
+  } else {
+    dialog.querySelector("[autofocus]").focus({ preventScroll: true });
+  }
+}
+
+/** Reconciles the modal with the selected track and waits for its exit transition. */
+export function syncPlaylistPicker(region, esc, icon, render) {
+  const current = region.firstElementChild;
+  const html = renderPlaylistPicker(esc, icon);
+  if (!html) {
+    pickerHTML = "";
+    if (current && !current.inert) dismissPlaylistPicker(current);
+    return;
+  }
+  if (current && !current.inert) {
+    if (html !== pickerHTML) updatePlaylistPicker(current, html);
+    pickerHTML = html;
+    return;
+  }
+  if (current) removePlaylistPicker(current);
+
+  const dialog = region.ownerDocument.createElement("dialog");
+  dialog.className = "playlist-picker";
+  dialog.id = "playlist-picker";
+  dialog.setAttribute("aria-labelledby", "playlist-picker-title");
+  dialog.setAttribute("aria-describedby", "playlist-picker-track");
+  dialog.innerHTML = html;
+  pickerHTML = html;
+
+  const dismiss = () => {
+    if (closePlaylistPicker()) render();
+  };
   dialog.addEventListener("cancel", (event) => {
     event.preventDefault();
-    closePlaylistPicker();
-    render();
+    dismiss();
   });
   dialog.addEventListener("click", (event) => {
     if (event.target !== dialog) return;
     const bounds = dialog.getBoundingClientRect();
     if (event.clientX < bounds.left || event.clientX > bounds.right ||
         event.clientY < bounds.top || event.clientY > bounds.bottom) {
-      closePlaylistPicker();
-      render();
+      dismiss();
     }
   });
+  region.append(dialog);
   dialog.showModal();
+  // Apply the initial opacity and transform before starting the transition.
+  dialog.getBoundingClientRect();
+  dialog.dataset.visible = "";
 }
 
 /** Handles collection actions that do not start audio playback. */

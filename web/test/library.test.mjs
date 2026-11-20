@@ -9,8 +9,11 @@ import {
   isFavorite,
   isLibraryPersistent,
   refreshLibrary,
+  renderPlaylists,
   setLibraryUser,
   showPlaylistPicker,
+  syncPlaylistForms,
+  syncPlaylistPicker,
   toggleFavorite,
 } from "../src/library.js";
 
@@ -51,6 +54,55 @@ function submit(libraryForm, value) {
 
 function savedLibrary(account) {
   return JSON.parse(storage.get(`otoha.library.v1.${account}`));
+}
+
+function pickerFixture() {
+  const document = { createElement: () => new PickerDialog() };
+  const region = {
+    ownerDocument: document,
+    firstElementChild: null,
+    append(dialog) { this.firstElementChild = dialog; },
+  };
+  class PickerDialog extends EventTarget {
+    dataset = {};
+    open = false;
+    inert = false;
+    fade = null;
+
+    get isConnected() { return region.firstElementChild === this; }
+    get innerHTML() { return this.html; }
+    set innerHTML(html) {
+      this.html = html;
+      this.input = {
+        value: "",
+        selectionStart: 0,
+        selectionEnd: 0,
+        focus() { document.activeElement = this; },
+        setSelectionRange(start, end) {
+          this.selectionStart = start;
+          this.selectionEnd = end;
+        },
+      };
+    }
+    querySelector(selector) {
+      assert.equal(selector, "input");
+      return this.input;
+    }
+    get ownerDocument() { return document; }
+    setAttribute() {}
+    getBoundingClientRect() { return { left: 20, top: 20, right: 100, bottom: 100 }; }
+    showModal() { this.open = true; }
+    close() { this.open = false; }
+    remove() { region.firstElementChild = null; }
+    getAnimations() {
+      return this.fade ? [{ transitionProperty: "opacity", finished: this.fade.promise }] : [];
+    }
+  }
+
+  function render() {
+    syncPlaylistPicker(region, String, () => "", render);
+  }
+  return { region, render };
 }
 
 beforeEach(() => {
@@ -104,6 +156,155 @@ test("creates, adds, renames, moves, and removes tracks without persisting remot
   assert.equal(getPlaylist(id).name, "雨与海");
   action("playlist-remove-track", { playlistId: id, trackId: "9" });
   assert.deepEqual(getPlaylist(id).tracks.map((track) => track.id), [7]);
+});
+
+test("inline playlist forms keep stable markup and make only the expanded form focusable", (context) => {
+  context.after(() => action("playlist-cancel-form"));
+  action("playlist-create");
+  submit("create", "通勤");
+  const [{ id }] = savedLibrary(101).playlists;
+  const document = { activeElement: null };
+  const panels = ["create", "rename"].map((mode) => {
+    const input = {
+      value: "",
+      toggleAttribute(name, enabled) {
+        assert.equal(name, "data-library-autofocus");
+        this.autofocus = enabled;
+      },
+    };
+    const form = {
+      elements: { namedItem: () => input },
+      reset() { input.value = mode === "create" ? "" : "通勤"; },
+    };
+    const trigger = {
+      dataset: { playlistId: id },
+      setAttribute(name, value) { this[name] = value; },
+      focus() { document.activeElement = this; },
+    };
+    return {
+      id: `playlist-form-${mode}`,
+      dataset: { playlistForm: mode },
+      inert: true,
+      "aria-hidden": "true",
+      contains: (element) => element === input,
+      querySelector: () => form,
+      getAttribute(name) { return this[name]; },
+      setAttribute(name, value) { this[name] = value; },
+      input,
+      trigger,
+    };
+  });
+  const region = {
+    ownerDocument: document,
+    querySelectorAll: () => panels,
+    querySelector: (selector) => panels.find((panel) => selector.includes(panel.id)).trigger,
+  };
+  const [create, rename] = panels;
+  const markup = renderPlaylists(String, () => "");
+  assert.match(markup, /id="playlist-form-create"[^>]*aria-hidden="true" inert/);
+  assert.match(markup, /id="playlist-form-rename"[^>]*aria-hidden="true" inert/);
+  assert.doesNotMatch(markup, /data-library-autofocus/);
+
+  action("playlist-create");
+  assert.equal(renderPlaylists(String, () => ""), markup);
+  syncPlaylistForms(region);
+  assert.equal(create.inert, false);
+  assert.equal(create.input.autofocus, true);
+  assert.equal(create.trigger["aria-expanded"], "true");
+  create.input.value = "未保存";
+  document.activeElement = create.input;
+  syncPlaylistForms(region);
+  assert.equal(create.input.value, "未保存");
+
+  action("playlist-cancel-form");
+  syncPlaylistForms(region);
+  assert.equal(create.inert, true);
+  assert.equal(create.input.autofocus, false);
+  assert.equal(create.trigger["aria-expanded"], "false");
+  assert.equal(document.activeElement, create.trigger);
+
+  action("playlist-rename", { playlistId: id });
+  assert.equal(renderPlaylists(String, () => ""), markup);
+  syncPlaylistForms(region);
+  assert.equal(create.inert, true);
+  assert.equal(rename.inert, false);
+  assert.equal(rename.input.autofocus, true);
+  assert.equal(rename.input.value, "通勤");
+});
+
+test("the open playlist picker keeps its dialog and waits for the exit fade on Escape", async (context) => {
+  context.after(() => closePlaylistPicker());
+  const { region, render } = pickerFixture();
+  showPlaylistPicker(firstTrack);
+  render();
+  const dialog = region.firstElementChild;
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.dataset.visible, "");
+  render();
+  assert.equal(region.firstElementChild, dialog);
+
+  dialog.fade = Promise.withResolvers();
+  const escape = new Event("cancel", { cancelable: true });
+  assert.equal(dialog.dispatchEvent(escape), false);
+  render();
+  assert.equal(dialog.dataset.visible, undefined);
+  assert.equal(dialog.inert, true);
+  assert.equal(dialog.open, true);
+  assert.equal(region.firstElementChild, dialog);
+
+  dialog.fade.resolve();
+  await dialog.fade.promise;
+  assert.equal(region.firstElementChild, null);
+  assert.equal(dialog.open, false);
+});
+
+test("updating the playlist choices preserves the open picker and its draft", (context) => {
+  context.after(() => closePlaylistPicker());
+  const { region, render } = pickerFixture();
+  showPlaylistPicker(firstTrack);
+  render();
+  const dialog = region.firstElementChild;
+  dialog.input.value = "夜间收藏";
+  dialog.input.focus();
+  dialog.input.setSelectionRange(0, 2);
+
+  const key = "otoha.library.v1.101";
+  storage.set(key, JSON.stringify({ playlists: [{ id: "new", name: "通勤", tracks: [] }] }));
+  assert.equal(refreshLibrary(key), true);
+  render();
+
+  assert.equal(region.firstElementChild, dialog);
+  assert.match(dialog.innerHTML, /通勤/);
+  assert.equal(dialog.input.value, "夜间收藏");
+  assert.equal(dialog.ownerDocument.activeElement, dialog.input);
+  assert.deepEqual([dialog.input.selectionStart, dialog.input.selectionEnd], [0, 2]);
+});
+
+test("a canceled exit cannot remove a reopened picker, and no transition closes immediately", async (context) => {
+  context.after(() => closePlaylistPicker());
+  const { region, render } = pickerFixture();
+  showPlaylistPicker(firstTrack);
+  render();
+  const closing = region.firstElementChild;
+  closing.fade = Promise.withResolvers();
+  action("playlist-close-picker");
+  render();
+
+  showPlaylistPicker(secondTrack);
+  render();
+  const reopened = region.firstElementChild;
+  assert.notEqual(reopened, closing);
+  assert.equal(closing.open, false);
+  assert.match(reopened.innerHTML, /海/);
+  closing.fade.reject(new Error("Transition canceled"));
+  await assert.rejects(closing.fade.promise, /Transition canceled/);
+  assert.equal(region.firstElementChild, reopened);
+  assert.equal(reopened.open, true);
+
+  action("playlist-close-picker");
+  render();
+  assert.equal(region.firstElementChild, null);
+  assert.equal(reopened.open, false);
 });
 
 test("retains segment boundaries when a playlist is saved and restored", () => {
